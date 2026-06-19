@@ -38,11 +38,12 @@ function formatSize(bytes) {
 }
 
 export class FileBrowser {
-  constructor(container, pathEl, messageInput, onFileInserted = null) {
+  constructor(container, pathEl, messageInput, onFileInserted = null, getSessionId = null) {
     this.container = container;
     this.pathEl = pathEl;
     this.messageInput = messageInput;
     this.onFileInserted = onFileInserted;
+    this.getSessionId = getSessionId;
     this.currentPath = null;
 
     this.setupDropTarget();
@@ -52,9 +53,19 @@ export class FileBrowser {
     this.container.innerHTML = '<div class="file-loading">Loading…</div>';
 
     try {
-      const url = dirPath
-        ? `/api/files?path=${encodeURIComponent(dirPath)}`
-        : '/api/files';
+      const params = new URLSearchParams();
+      const sessionId = this.getSessionId?.();
+      if (!sessionId) {
+        this.currentPath = null;
+        this.pathEl.textContent = '';
+        this.pathEl.title = '';
+        this.container.innerHTML = '<div class="file-loading">Select a Tau tab to browse files</div>';
+        return;
+      }
+      params.set('sessionId', sessionId);
+      if (dirPath) params.set('path', dirPath);
+      const qs = params.toString();
+      const url = qs ? `/api/files?${qs}` : '/api/files';
       const res = await fetch(url);
       const data = await res.json();
 
@@ -141,10 +152,12 @@ export class FileBrowser {
 
   async openNatively(filePath) {
     try {
+      const sessionId = this.getSessionId?.();
+      if (!sessionId) return;
       await fetch('/api/open', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath }),
+        body: JSON.stringify({ filePath, sessionId }),
       });
     } catch (err) {
       console.error('[FileBrowser] Failed to open:', err);

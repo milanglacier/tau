@@ -223,7 +223,7 @@ export class SessionSidebar {
 
     const items = [
       { icon: isFav ? '★' : '☆', label: isFav ? 'Unfavourite' : 'Favourite', action: () => this.toggleFavourite(session.filePath) },
-      { icon: '✎', label: 'Rename', action: () => this.startRename(itemEl) },
+      { icon: '✎', label: 'Rename', action: () => this.startRename(itemEl, session) },
       { icon: '📋', label: 'Export HTML', action: () => this.exportSession(session) },
       { icon: '🗑', label: 'Delete', action: () => this.deleteSession(session, itemEl) },
     ];
@@ -260,7 +260,7 @@ export class SessionSidebar {
     }
   }
 
-  startRename(itemEl) {
+  startRename(itemEl, session) {
     const titleEl = itemEl.querySelector('.session-title');
     if (!titleEl) return;
     const currentName = titleEl.textContent;
@@ -279,7 +279,7 @@ export class SessionSidebar {
           await fetch('/api/rpc', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'set_session_name', name: newName }),
+            body: JSON.stringify({ type: 'set_session_name', name: newName, filePath: session.filePath }),
           });
         } catch { /* silent */ }
       }
@@ -329,10 +329,14 @@ export class SessionSidebar {
       const data = await (await fetch('/api/rpc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'export_html' }),
+        body: JSON.stringify({ type: 'export_html', filePath: session.filePath }),
       })).json();
       if (data?.success && data.data?.path) {
-        window.open(`/api/sessions/${encodeURIComponent(data.data.path)}`);
+        await fetch('/api/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filePath: data.data.path }),
+        });
       }
     } catch { /* silent */ }
   }
@@ -352,7 +356,7 @@ export class SessionSidebar {
 
     const title = session.name || session.firstMessage || 'Empty session';
     const time = this.formatTime(session.timestamp);
-    const tmuxTag = session.tmux ? '<span class="session-tag tmux-tag">tmux</span>' : '';
+    const tmuxTag = session.live ? '<span class="session-tag tmux-tag">live</span>' : (session.tmux ? '<span class="session-tag tmux-tag">tmux</span>' : '');
     const favIcon = this.isFavourite(session.filePath) ? '<span class="session-fav-icon">★</span>' : '';
 
     item.innerHTML = `

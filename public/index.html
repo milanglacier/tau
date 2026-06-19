@@ -77,6 +77,12 @@
         </div>
       </div>
 
+      <!-- In-page Tau live-session tabs -->
+      <div class="live-tabs" id="live-tabs">
+        <div class="live-tabs-list" id="live-tabs-list"></div>
+        <button class="live-tab-add" id="live-tab-add" title="New Tau tab" aria-label="New Tau tab">+</button>
+      </div>
+
       <!-- Launcher (project picker) -->
       <div class="launcher hidden" id="launcher"></div>
 
@@ -207,6 +213,27 @@
   <div class="command-palette hidden" id="command-palette">
     <div class="command-palette-header">Commands</div>
     <div class="command-list" id="command-list"></div>
+  </div>
+
+  <!-- New live session modal -->
+  <div class="new-live-session-overlay hidden" id="new-live-session-overlay"></div>
+  <div class="new-live-session-modal hidden" id="new-live-session-modal">
+    <div class="new-live-session-header">
+      <h3>New Tau Tab</h3>
+      <button class="settings-close" id="new-live-session-close" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <form class="new-live-session-body" id="new-live-session-form">
+      <label class="new-live-session-label" for="new-live-session-cwd">Project directory</label>
+      <input class="new-live-session-input" id="new-live-session-cwd" type="text" placeholder="/path/to/project" autocomplete="off" required>
+      <div class="project-chips" id="new-live-session-projects"></div>
+      <label class="new-live-session-label" for="new-live-session-model">Model</label>
+      <input class="new-live-session-input" id="new-live-session-model" type="text" placeholder="openai/gpt-5.5:high" autocomplete="off">
+      <p class="new-live-session-help">Uses the same syntax as Pi <code>/model</code>; applies only to this tab. Leave blank for Pi default.</p>
+      <div class="new-live-session-actions">
+        <button type="button" class="secondary-btn" id="new-live-session-cancel">Cancel</button>
+        <button type="submit" class="primary-btn" id="new-live-session-submit">Create tab</button>
+      </div>
+    </form>
   </div>
 
   <!-- Dialog Container -->

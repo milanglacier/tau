@@ -3,17 +3,20 @@
  */
 
 export class DialogHandler {
-  constructor(container, wsClient) {
+  constructor(container, wsClient, getSessionId = null) {
     this.container = container;
     this.wsClient = wsClient;
+    this.getSessionId = getSessionId;
     this.currentDialog = null;
+    this.currentRequest = null;
     this.timeoutId = null;
+    this.onIdle = null;
   }
 
   showSelect(request) {
-    this.clearCurrentDialog();
+    this.cancelCurrentDialog(true);
 
-    const { id, title, options, timeout } = request;
+    const { id, title, options, timeout, sessionId } = request;
 
     const dialog = document.createElement('div');
     dialog.className = 'dialog';
@@ -32,22 +35,22 @@ export class DialogHandler {
       optionDiv.className = 'dialog-option';
       optionDiv.textContent = option;
       optionDiv.onclick = () => {
-        this.respond(id, { value: option });
+        this.respond(id, { value: option }, sessionId);
       };
       optionsContainer.appendChild(optionDiv);
     });
 
     dialog.querySelector('#dialog-cancel').onclick = () => {
-      this.respond(id, { cancelled: true });
+      this.respond(id, { cancelled: true }, sessionId);
     };
 
-    this.showDialog(dialog, timeout, id);
+    this.showDialog(dialog, timeout, id, sessionId, request);
   }
 
   showConfirm(request) {
-    this.clearCurrentDialog();
+    this.cancelCurrentDialog(true);
 
-    const { id, title, message, timeout } = request;
+    const { id, title, message, timeout, sessionId } = request;
 
     const dialog = document.createElement('div');
     dialog.className = 'dialog';
@@ -61,20 +64,20 @@ export class DialogHandler {
     `;
 
     dialog.querySelector('#dialog-yes').onclick = () => {
-      this.respond(id, { confirmed: true });
+      this.respond(id, { confirmed: true }, sessionId);
     };
 
     dialog.querySelector('#dialog-no').onclick = () => {
-      this.respond(id, { confirmed: false });
+      this.respond(id, { confirmed: false }, sessionId);
     };
 
-    this.showDialog(dialog, timeout, id);
+    this.showDialog(dialog, timeout, id, sessionId, request);
   }
 
   showInput(request) {
-    this.clearCurrentDialog();
+    this.cancelCurrentDialog(true);
 
-    const { id, title, placeholder, timeout } = request;
+    const { id, title, placeholder, timeout, sessionId } = request;
 
     const dialog = document.createElement('div');
     dialog.className = 'dialog';
@@ -91,7 +94,7 @@ export class DialogHandler {
     
     const submit = () => {
       const value = input.value.trim();
-      this.respond(id, value ? { value } : { cancelled: true });
+      this.respond(id, value ? { value } : { cancelled: true }, sessionId);
     };
 
     input.addEventListener('keypress', (e) => {
@@ -100,19 +103,19 @@ export class DialogHandler {
 
     dialog.querySelector('#dialog-submit').onclick = submit;
     dialog.querySelector('#dialog-cancel').onclick = () => {
-      this.respond(id, { cancelled: true });
+      this.respond(id, { cancelled: true }, sessionId);
     };
 
-    this.showDialog(dialog, timeout, id);
+    this.showDialog(dialog, timeout, id, sessionId, request);
     
     // Focus input after a short delay
     setTimeout(() => input.focus(), 100);
   }
 
   showEditor(request) {
-    this.clearCurrentDialog();
+    this.cancelCurrentDialog(true);
 
-    const { id, title, prefill, timeout } = request;
+    const { id, title, prefill, timeout, sessionId } = request;
 
     const dialog = document.createElement('div');
     dialog.className = 'dialog';
@@ -129,14 +132,14 @@ export class DialogHandler {
 
     dialog.querySelector('#dialog-save').onclick = () => {
       const value = textarea.value;
-      this.respond(id, value ? { value } : { cancelled: true });
+      this.respond(id, value ? { value } : { cancelled: true }, sessionId);
     };
 
     dialog.querySelector('#dialog-cancel').onclick = () => {
-      this.respond(id, { cancelled: true });
+      this.respond(id, { cancelled: true }, sessionId);
     };
 
-    this.showDialog(dialog, timeout, id);
+    this.showDialog(dialog, timeout, id, sessionId, request);
     
     // Focus textarea after a short delay
     setTimeout(() => textarea.focus(), 100);
@@ -163,8 +166,9 @@ export class DialogHandler {
     }
   }
 
-  showDialog(dialogElement, timeout, requestId) {
+  showDialog(dialogElement, timeout, requestId, sessionId = null, request = null) {
     this.currentDialog = dialogElement;
+    this.currentRequest = { id: requestId, sessionId, request };
     this.container.innerHTML = '';
     this.container.appendChild(dialogElement);
     this.container.classList.remove('hidden');
@@ -172,9 +176,25 @@ export class DialogHandler {
     // Set up timeout if specified
     if (timeout) {
       this.timeoutId = setTimeout(() => {
-        this.respond(requestId, { cancelled: true });
+        this.respond(requestId, { cancelled: true }, sessionId);
       }, timeout);
     }
+  }
+
+  cancelCurrentDialog(suppressIdle = false) {
+    if (!this.currentRequest?.id) {
+      this.clearCurrentDialog();
+      return;
+    }
+    const { id, sessionId } = this.currentRequest;
+    this.clearCurrentDialog();
+    this.wsClient.send({
+      type: 'extension_ui_response',
+      id,
+      sessionId: sessionId || this.getSessionId?.(),
+      cancelled: true,
+    });
+    if (!suppressIdle) this.onIdle?.();
   }
 
   clearCurrentDialog() {
@@ -186,15 +206,18 @@ export class DialogHandler {
     this.container.innerHTML = '';
     this.container.classList.add('hidden');
     this.currentDialog = null;
+    this.currentRequest = null;
   }
 
-  respond(id, response) {
+  respond(id, response, sessionId = null) {
     this.clearCurrentDialog();
     this.wsClient.send({
       type: 'extension_ui_response',
       id,
+      sessionId: sessionId || this.getSessionId?.(),
       ...response
     });
+    this.onIdle?.();
   }
 
   escapeHtml(text) {

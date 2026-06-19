@@ -19,7 +19,7 @@ const wsClient = new WebSocketClient(wsUrl);
 const state = new StateManager();
 const messageRenderer = new MessageRenderer(document.getElementById('messages'));
 const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages'));
-const dialogHandler = new DialogHandler(document.getElementById('dialog-container'), wsClient);
+const dialogHandler = new DialogHandler(document.getElementById('dialog-container'), wsClient, () => activeLiveSessionId);
 
 // Session sidebar
 const sidebar = new SessionSidebar(
@@ -61,10 +61,15 @@ let isScrolledUp = false;
 let hasNewWhileScrolled = false;
 let lastSentMessage = null; // Track to avoid duplicate rendering in mirror mode
 let lastUsage = null; // Full usage object for context visualiser
-let mirrorActiveSessionFile = null; // The live session file path from the TUI
-let viewingActiveSession = true; // Whether we're viewing the live session or a historical one
-let isMirrorMode = false; // Set when mirror_sync received
-let liveInstances = []; // All running Tau instances [{port, sessionFile, cwd}]
+let mirrorActiveSessionFile = null; // The active live session file path
+let viewingActiveSession = false; // Whether we're viewing a live backend Tau tab or historical read-only session
+let isMirrorMode = false; // Legacy name: true when standalone live-session mode is connected
+let liveInstances = []; // Legacy sidebar live indicators; now derived from backend live sessions
+let liveSessions = [];
+let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
+let hasRestoredInitialLiveSession = false;
+let pendingExtensionUIRequests = []; // background session UI requests waiting for that Tau tab to be selected
+dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
 // File browser
 const fileSidebar = document.getElementById('file-sidebar');
@@ -76,9 +81,9 @@ const fileSidebarPath = document.getElementById('file-sidebar-path');
 const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput, (filePath) => {
   const name = filePath.split(/[/\\]/).pop() || filePath;
   const ext = name.split('.').pop()?.toLowerCase() || '';
-  pendingFilePaths.push({ path: filePath, name, ext });
+  pendingFilePaths.push({ path: filePath, name, ext, sessionId: activeLiveSessionId });
   renderAttachmentPreviews();
-});
+}, () => (viewingActiveSession && liveSessions.some(s => s.id === activeLiveSessionId) ? activeLiveSessionId : null));
 
 fileSidebarToggle.addEventListener('click', () => {
   const isCollapsed = fileSidebar.classList.toggle('collapsed');
@@ -105,11 +110,12 @@ fetch('/api/health').then(r => r.json()).then(data => {
 }).catch(() => {});
 
 document.getElementById('file-sidebar-finder').addEventListener('click', () => {
-  if (fileBrowser.currentPath) {
+  const sessionId = viewingActiveSession && activeLiveSessionId ? activeLiveSessionId : null;
+  if (fileBrowser.currentPath && sessionId) {
     fetch('/api/open', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filePath: fileBrowser.currentPath }),
+      body: JSON.stringify({ filePath: fileBrowser.currentPath, sessionId }),
     });
   }
 });
@@ -200,11 +206,64 @@ wsClient.addEventListener('reconnectFailed', () => {
 });
 
 wsClient.addEventListener('rpcEvent', (e) => {
-  handleRPCEvent(e.detail);
+  const detail = e.detail || {};
+  const event = detail.event || detail;
+  const sessionId = detail.sessionId;
+  if (sessionId) {
+    const session = liveSessions.find(s => s.id === sessionId);
+    if (session) {
+      session.lastActiveAt = new Date().toISOString();
+      if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
+      if (event.type === 'agent_end' || event.type === 'turn_end') session.isStreaming = false;
+      if (event.type === 'session_name' && event.name) session.sessionName = event.name;
+      if (event.message?.usage) session.contextUsage = { ...(session.contextUsage || {}), usage: event.message.usage };
+      renderLiveTabs();
+    }
+    if (sessionId !== activeLiveSessionId || !viewingActiveSession) {
+      if (event.type === 'extension_ui_request') queueExtensionUIRequest(event, sessionId);
+      return;
+    }
+  }
+  handleRPCEvent(event, sessionId);
 });
 
 wsClient.addEventListener('serverError', (e) => {
   messageRenderer.renderError(e.detail.message);
+});
+
+wsClient.addEventListener('stateUpdate', (e) => {
+  if (e.detail.mode === 'standalone') {
+    const wasViewingLive = viewingActiveSession;
+    const launcherVisible = isLauncherVisible();
+    isMirrorMode = true;
+    setLiveSessions(e.detail.liveSessions || []);
+    if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
+      hasRestoredInitialLiveSession = true;
+      restoreActiveLiveSession();
+    } else {
+      if (activeLiveSessionId && !liveSessions.some(s => s.id === activeLiveSessionId)) {
+        activeLiveSessionId = null;
+        localStorage.removeItem('tau-active-live-session-id');
+        renderQueuedMessages();
+        renderLiveTabs();
+      }
+      updateMirrorInputState();
+      updateMirrorLiveIndicator();
+    }
+  }
+});
+
+wsClient.addEventListener('liveSessionCreated', (e) => {
+  upsertLiveSession(e.detail);
+});
+
+wsClient.addEventListener('liveSessionUpdated', (e) => {
+  upsertLiveSession(e.detail);
+  if (e.detail?.id === activeLiveSessionId) applyActiveSessionMetadata(e.detail);
+});
+
+wsClient.addEventListener('liveSessionClosed', (e) => {
+  handleLiveSessionClosed(e.detail.sessionId);
 });
 
 // Mirror mode: receive full state snapshot on connect
@@ -213,15 +272,269 @@ wsClient.addEventListener('mirrorSync', (e) => {
 });
 
 // ═══════════════════════════════════════
+// Standalone live-session tabs
+// ═══════════════════════════════════════
+
+const liveTabsList = document.getElementById('live-tabs-list');
+const liveTabAddBtn = document.getElementById('live-tab-add');
+const newLiveSessionOverlay = document.getElementById('new-live-session-overlay');
+const newLiveSessionModal = document.getElementById('new-live-session-modal');
+const newLiveSessionForm = document.getElementById('new-live-session-form');
+const newLiveSessionCwd = document.getElementById('new-live-session-cwd');
+const newLiveSessionModel = document.getElementById('new-live-session-model');
+const newLiveSessionProjects = document.getElementById('new-live-session-projects');
+const newLiveSessionSubmit = document.getElementById('new-live-session-submit');
+
+function setLiveSessions(sessions) {
+  liveSessions = sessions || [];
+  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
+  renderLiveTabs();
+  updateMirrorLiveIndicator();
+}
+
+function handleLiveSessionClosed(closedId) {
+  if (!closedId) return;
+  liveSessions = liveSessions.filter(s => s.id !== closedId);
+  messageQueue = messageQueue.filter(cmd => cmd.sessionId !== closedId);
+  pendingExtensionUIRequests = pendingExtensionUIRequests.filter(req => req.sessionId !== closedId);
+  if (dialogHandler.currentRequest?.sessionId === closedId) {
+    dialogHandler.clearCurrentDialog();
+    processQueuedExtensionUIRequest();
+  }
+  renderQueuedMessages();
+  if (activeLiveSessionId === closedId) {
+    const wasViewingActive = viewingActiveSession;
+    activeLiveSessionId = null;
+    localStorage.removeItem('tau-active-live-session-id');
+    mirrorActiveSessionFile = null;
+    currentStreamingElement = null;
+    currentStreamingThinking = '';
+    currentStreamingText = '';
+    state.reset();
+    showTypingIndicator(false);
+    if (wasViewingActive) {
+      messageRenderer.clear();
+      toolCardRenderer.clear();
+      const next = getMostRecentLiveSession();
+      if (next) selectLiveSession(next.id);
+      else {
+        viewingActiveSession = false;
+        messageRenderer.renderWelcome();
+        updateMirrorInputState();
+        updateUI();
+      }
+    } else {
+      updateMirrorInputState();
+      updateUI();
+    }
+  }
+  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
+  renderLiveTabs();
+  updateMirrorLiveIndicator();
+}
+
+function upsertLiveSession(session) {
+  if (!session) return;
+  const idx = liveSessions.findIndex(s => s.id === session.id);
+  if (idx >= 0) liveSessions[idx] = { ...liveSessions[idx], ...session };
+  else liveSessions.push(session);
+  liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
+  renderLiveTabs();
+  updateMirrorLiveIndicator();
+}
+
+function getMostRecentLiveSession() {
+  return [...liveSessions].sort((a, b) => new Date(b.lastActiveAt || b.createdAt || 0) - new Date(a.lastActiveAt || a.createdAt || 0))[0] || null;
+}
+
+function basename(p) {
+  return (p || '').split(/[/\\]/).filter(Boolean).pop() || p || 'session';
+}
+
+function compactModelLabel(session) {
+  const raw = session.modelLabel || session.modelSpec || session.model?.id || session.model?.name || 'default';
+  return String(raw).replace(/^.*\//, '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+}
+
+function renderLiveTabs() {
+  if (!liveTabsList) return;
+  liveTabsList.innerHTML = '';
+  for (const session of liveSessions) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = `live-tab${session.id === activeLiveSessionId ? ' active' : ''}`;
+    tab.title = `${session.cwd || ''}${session.modelSpec ? ` • ${session.modelSpec}` : ''}`;
+    tab.innerHTML = `
+      ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
+      ${hasPendingExtensionUIRequest(session.id) ? '<span class="live-tab-ui-dot" title="Waiting for response">?</span>' : ''}
+      <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd))}</span>
+      <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
+      <span class="live-tab-close" title="Close Tau tab">×</span>
+    `;
+    tab.addEventListener('click', () => selectLiveSession(session.id));
+    tab.querySelector('.live-tab-close')?.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closeLiveSession(session.id);
+    });
+    liveTabsList.appendChild(tab);
+  }
+}
+
+function restoreActiveLiveSession() {
+  const saved = activeLiveSessionId && liveSessions.find(s => s.id === activeLiveSessionId);
+  const next = saved || getMostRecentLiveSession();
+  if (next) {
+    selectLiveSession(next.id);
+  } else {
+    activeLiveSessionId = null;
+    viewingActiveSession = false;
+    mirrorActiveSessionFile = null;
+    localStorage.removeItem('tau-active-live-session-id');
+    state.reset();
+    renderQueuedMessages();
+    renderLiveTabs();
+    updateMirrorInputState();
+  }
+}
+
+async function selectLiveSession(id) {
+  const session = liveSessions.find(s => s.id === id);
+  if (!session) return;
+  suspendCurrentDialogForTabSwitch(id);
+  hideLauncher();
+  activeLiveSessionId = id;
+  localStorage.setItem('tau-active-live-session-id', id);
+  viewingActiveSession = true;
+  mirrorActiveSessionFile = session.sessionFile || null;
+  renderLiveTabs();
+  renderQueuedMessages();
+  applyActiveSessionMetadata(session);
+  currentStreamingElement = null;
+  currentStreamingThinking = '';
+  currentStreamingText = '';
+  state.reset();
+  state.setStreaming(!!session.isStreaming);
+  messageRenderer.clear();
+  toolCardRenderer.clear();
+  try {
+    const res = await fetch(`/api/live-sessions/${encodeURIComponent(id)}/snapshot`);
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      handleLiveSessionClosed(id);
+      throw new Error(data.error || 'Live session not found');
+    }
+    handleMirrorSync({ ...data, sessionId: id });
+  } catch (e) {
+    messageRenderer.renderError(e.message || 'Failed to load live session snapshot');
+    return;
+  }
+  if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
+  updateMirrorInputState();
+  processQueuedExtensionUIRequest(id);
+  flushQueue();
+}
+
+function applyActiveSessionMetadata(session) {
+  if (!session) return;
+  currentModelId = session.model?.id || session.modelLabel || session.modelSpec || '';
+  updateModelLabel();
+  currentThinkingLevel = session.thinkingLevel || 'off';
+  updateThinkingBtn();
+}
+
+async function closeLiveSession(id) {
+  const session = liveSessions.find(s => s.id === id);
+  if (!session) return;
+  const hasQueuedMessages = messageQueue.some(cmd => cmd.sessionId === id);
+  if (session.isStreaming || hasQueuedMessages) {
+    const reason = session.isStreaming && hasQueuedMessages
+      ? 'This Tau tab is streaming and has queued unsent messages. Close it, terminate the Pi session, and discard the queue?'
+      : session.isStreaming
+        ? 'This Tau tab is streaming. Close it and terminate the Pi session?'
+        : 'This Tau tab has queued unsent messages. Close it and discard them?';
+    if (!confirm(reason)) return;
+  }
+  try {
+    await fetch(`/api/live-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch (e) {
+    messageRenderer.renderError('Failed to close Tau tab');
+  }
+}
+
+async function loadProjectChips() {
+  if (!newLiveSessionProjects) return;
+  newLiveSessionProjects.innerHTML = '';
+  try {
+    const res = await fetch('/api/projects');
+    const data = await res.json();
+    for (const project of data.projects || []) {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'project-chip';
+      chip.textContent = project.name;
+      chip.title = project.path;
+      chip.addEventListener('click', () => { newLiveSessionCwd.value = project.path; });
+      newLiveSessionProjects.appendChild(chip);
+    }
+  } catch {}
+}
+
+function openNewLiveSessionModal() {
+  newLiveSessionOverlay?.classList.remove('hidden');
+  newLiveSessionModal?.classList.remove('hidden');
+  newLiveSessionSubmit.disabled = false;
+  if (!newLiveSessionCwd.value) newLiveSessionCwd.value = liveSessions.find(s => s.id === activeLiveSessionId)?.cwd || '';
+  loadProjectChips();
+  requestAnimationFrame(() => newLiveSessionCwd?.focus());
+}
+
+function closeNewLiveSessionModal() {
+  newLiveSessionOverlay?.classList.add('hidden');
+  newLiveSessionModal?.classList.add('hidden');
+}
+
+liveTabAddBtn?.addEventListener('click', openNewLiveSessionModal);
+document.getElementById('new-live-session-close')?.addEventListener('click', closeNewLiveSessionModal);
+document.getElementById('new-live-session-cancel')?.addEventListener('click', closeNewLiveSessionModal);
+newLiveSessionOverlay?.addEventListener('click', closeNewLiveSessionModal);
+newLiveSessionForm?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const cwd = newLiveSessionCwd.value.trim();
+  if (!cwd) return;
+  newLiveSessionSubmit.disabled = true;
+  newLiveSessionSubmit.textContent = 'Starting…';
+  try {
+    const res = await fetch('/api/live-sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cwd, model: newLiveSessionModel.value.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Failed to create Tau tab');
+    upsertLiveSession(data.session);
+    closeNewLiveSessionModal();
+    newLiveSessionModel.value = '';
+    await selectLiveSession(data.session.id);
+  } catch (err) {
+    messageRenderer.renderError(err.message || 'Failed to create Tau tab');
+  } finally {
+    newLiveSessionSubmit.disabled = false;
+    newLiveSessionSubmit.textContent = 'Create tab';
+  }
+});
+
+// ═══════════════════════════════════════
 // RPC event handlers
 // ═══════════════════════════════════════
 
-function handleRPCEvent(event) {
+function handleRPCEvent(event, sessionId = null) {
   switch (event.type) {
     case 'agent_start':
+    case 'turn_start':
       handleAgentStart();
       break;
     case 'agent_end':
+    case 'turn_end':
       handleAgentEnd();
       break;
     case 'message_start':
@@ -249,7 +562,7 @@ function handleRPCEvent(event) {
       handleCompactionEnd(event);
       break;
     case 'extension_ui_request':
-      handleExtensionUIRequest(event);
+      handleExtensionUIRequest(event, sessionId);
       break;
     case 'extension_error':
       messageRenderer.renderError(`Extension error: ${event.error}`);
@@ -293,14 +606,16 @@ function handleAgentStart() {
 }
 
 function handleAgentEnd() {
+  const wasStreaming = state.isStreaming;
   state.setStreaming(false);
   showTypingIndicator(false);
   currentStreamingElement = null;
   currentStreamingText = '';
   updateUI();
 
-  // Notify via tab title if unfocused
-  if (!hasFocus) {
+  // Notify via tab title if unfocused. Guard with wasStreaming so paired
+  // turn_end/agent_end events do not double-count the same completed turn.
+  if (wasStreaming && !hasFocus) {
     unreadCount++;
     document.title = `(${unreadCount}) ● ${originalTitle}`;
 
@@ -338,15 +653,30 @@ function getMessageText(message) {
   return '';
 }
 
+function getMessageThinking(message) {
+  if (!Array.isArray(message?.content)) return '';
+  return message.content
+    .filter(b => b.type === 'thinking')
+    .map(b => b.thinking || b.text || '')
+    .filter(Boolean)
+    .join('\n');
+}
+
 function handleMessageUpdate(event) {
   const { assistantMessageEvent } = event;
 
   if (assistantMessageEvent.type === 'thinking_delta') {
+    if (!currentStreamingElement) {
+      currentStreamingElement = messageRenderer.renderAssistantMessage({ content: '' }, true);
+    }
     currentStreamingThinking += assistantMessageEvent.delta;
     if (currentStreamingElement) {
       messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
     }
   } else if (assistantMessageEvent.type === 'text_delta') {
+    if (!currentStreamingElement) {
+      currentStreamingElement = messageRenderer.renderAssistantMessage({ content: '' }, true);
+    }
     currentStreamingText += assistantMessageEvent.delta;
     if (currentStreamingElement) {
       messageRenderer.updateStreamingMessage(
@@ -358,13 +688,33 @@ function handleMessageUpdate(event) {
 }
 
 function handleMessageEnd(message) {
+  if (!currentStreamingElement && message?.role === 'assistant') {
+    messageRenderer.renderAssistantMessage(message, false, true);
+  }
   if (currentStreamingElement) {
+    // If this client attached mid-stream, local deltas may be incomplete. The
+    // message_end payload is authoritative, so refresh the streaming DOM from it
+    // before finalizing.
+    if (message?.role === 'assistant') {
+      const finalText = getMessageText(message);
+      const finalThinking = getMessageThinking(message);
+      if (finalText && finalText.length >= currentStreamingText.length) {
+        currentStreamingText = finalText;
+        messageRenderer.updateStreamingMessage(currentStreamingElement, currentStreamingText);
+      }
+      if (finalThinking && finalThinking.length >= currentStreamingThinking.length) {
+        currentStreamingThinking = finalThinking;
+        messageRenderer.updateStreamingThinking(currentStreamingElement, currentStreamingThinking);
+      }
+    }
+
     // Pass usage info for cost display
     const usage = message?.usage || null;
     // Pass thinking content so finalize can render the thinking block
     messageRenderer.finalizeStreamingMessage(currentStreamingElement, usage, currentStreamingThinking);
     currentStreamingElement = null;
     currentStreamingThinking = '';
+    currentStreamingText = '';
 
     // Track session cost and tokens
     if (usage?.cost?.total) {
@@ -417,22 +767,58 @@ function handleToolExecutionEnd(event) {
   toolCardRenderer.finalizeToolCard(toolCallId, result, isError);
 }
 
-function handleExtensionUIRequest(event) {
+function hasPendingExtensionUIRequest(sessionId) {
+  return pendingExtensionUIRequests.some(req => req.sessionId === sessionId);
+}
+
+function queueExtensionUIRequest(event, sessionId) {
+  if (!sessionId) {
+    handleExtensionUIRequest(event, sessionId);
+    return;
+  }
+  if (!pendingExtensionUIRequests.some(req => req.sessionId === sessionId && req.event?.id === event.id)) {
+    pendingExtensionUIRequests.push({ sessionId, event });
+  }
+  renderLiveTabs();
+}
+
+function processQueuedExtensionUIRequest(sessionId = activeLiveSessionId) {
+  if (!sessionId || !viewingActiveSession || sessionId !== activeLiveSessionId || dialogHandler.currentRequest) return;
+  const idx = pendingExtensionUIRequests.findIndex(req => req.sessionId === sessionId);
+  if (idx === -1) return;
+  const [{ event }] = pendingExtensionUIRequests.splice(idx, 1);
+  renderLiveTabs();
+  handleExtensionUIRequest(event, sessionId);
+}
+
+function suspendCurrentDialogForTabSwitch(nextSessionId) {
+  const current = dialogHandler.currentRequest;
+  if (!current?.sessionId || current.sessionId === nextSessionId) return;
+  const event = current.request;
+  if (event && !pendingExtensionUIRequests.some(req => req.sessionId === current.sessionId && req.event?.id === event.id)) {
+    pendingExtensionUIRequests.unshift({ sessionId: current.sessionId, event });
+  }
+  dialogHandler.clearCurrentDialog();
+  renderLiveTabs();
+}
+
+function handleExtensionUIRequest(event, sessionId = null) {
+  const request = sessionId ? { ...event, sessionId } : event;
   switch (event.method) {
     case 'select':
-      dialogHandler.showSelect(event);
+      dialogHandler.showSelect(request);
       break;
     case 'confirm':
-      dialogHandler.showConfirm(event);
+      dialogHandler.showConfirm(request);
       break;
     case 'input':
-      dialogHandler.showInput(event);
+      dialogHandler.showInput(request);
       break;
     case 'editor':
-      dialogHandler.showEditor(event);
+      dialogHandler.showEditor(request);
       break;
     case 'notify':
-      dialogHandler.showNotification(event);
+      dialogHandler.showNotification(request);
       break;
     default:
       console.warn('[App] Unknown extension UI method:', event.method);
@@ -611,7 +997,9 @@ function renderAttachmentPreviews() {
       el.title = fp.path;
       const thumb = document.createElement('img');
       thumb.style.cssText = 'width:100%;height:100%;object-fit:cover';
-      thumb.src = `/api/file/preview?path=${encodeURIComponent(fp.path)}`;
+      const previewParams = new URLSearchParams({ path: fp.path });
+      if (fp.sessionId) previewParams.set('sessionId', fp.sessionId);
+      thumb.src = `/api/file/preview?${previewParams.toString()}`;
       thumb.onerror = () => {
         el.classList.add('file-chip');
         thumb.remove();
@@ -669,8 +1057,16 @@ function sendMessage() {
   pendingFilePaths = [];
   renderAttachmentPreviews();
 
+  if (!activeLiveSessionId) {
+    messageRenderer.renderError('Create or select a Tau tab first.');
+    updateMirrorInputState();
+    return;
+  }
+
+  cmd.sessionId = activeLiveSessionId;
+
   if (state.isStreaming) {
-    // Queue it — show as bubble above input
+    // Queue it for the current Tau tab only; do not let tab switches retarget it.
     messageQueue.push(cmd);
     lastSentMessage = message;
     renderQueuedMessages();
@@ -692,6 +1088,7 @@ function renderQueuedMessages() {
   }
   queuedMessagesEl.classList.remove('hidden');
   messageQueue.forEach((cmd, i) => {
+    if (cmd.sessionId !== activeLiveSessionId) return;
     const el = document.createElement('div');
     el.className = 'queued-msg';
     el.innerHTML = `
@@ -705,6 +1102,7 @@ function renderQueuedMessages() {
     });
     queuedMessagesEl.appendChild(el);
   });
+  queuedMessagesEl.classList.toggle('hidden', queuedMessagesEl.children.length === 0);
 }
 
 function escapeHtml(text) {
@@ -714,8 +1112,11 @@ function escapeHtml(text) {
 }
 
 function flushQueue() {
-  if (messageQueue.length > 0 && !state.isStreaming) {
-    const cmd = messageQueue.shift();
+  if (!activeLiveSessionId || state.isStreaming) return;
+  const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId);
+  if (idx >= 0) {
+    const [cmd] = messageQueue.splice(idx, 1);
+    lastSentMessage = cmd.message;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
     renderQueuedMessages();
     wsClient.send(cmd);
@@ -723,7 +1124,8 @@ function flushQueue() {
 }
 
 abortBtn.addEventListener('click', () => {
-  wsClient.send({ type: 'abort' });
+  if (!viewingActiveSession || !activeLiveSessionId) return;
+  wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
   messageRenderer.renderError('Aborted by user');
   showTypingIndicator(false);
 });
@@ -778,6 +1180,15 @@ commandPaletteOverlay.addEventListener('click', closeCommandPalette);
 
 async function rpcCommand(cmd, statusMsg) {
   try {
+    const backendLocalCommands = new Set(['get_auth', 'set_auth', 'get_available_models']);
+    const needsLiveSession = !cmd.sessionId && !cmd.filePath && !backendLocalCommands.has(cmd.type);
+    if (needsLiveSession && (!viewingActiveSession || !activeLiveSessionId)) {
+      const error = 'Select a live Tau tab first.';
+      statusText.textContent = error;
+      setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+      return { type: 'response', command: cmd.type, success: false, error };
+    }
+    if (!cmd.sessionId && viewingActiveSession && activeLiveSessionId) cmd = { ...cmd, sessionId: activeLiveSessionId };
     if (statusMsg) statusText.textContent = statusMsg;
     const resp = await fetch('/api/rpc', {
       method: 'POST',
@@ -843,8 +1254,8 @@ let currentThinkingLevel = 'off';
 async function fetchModelInfo() {
   try {
     const [modelsResp, stateResp] = await Promise.all([
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models' }) }),
-      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_state' }) }),
+      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_available_models', sessionId: activeLiveSessionId }) }),
+      fetch('/api/rpc', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'get_state', sessionId: activeLiveSessionId }) }),
     ]);
     const modelsData = await modelsResp.json();
     const stateData = await stateResp.json();
@@ -853,7 +1264,8 @@ async function fetchModelInfo() {
       availableModels = modelsData.data.models;
     }
     if (stateData.success && stateData.data?.model) {
-      currentModelId = stateData.data.model.id || '';
+      const stateModel = stateData.data.model;
+      currentModelId = typeof stateModel === 'string' ? stateModel : (stateModel.id || stateModel.name || '');
       updateModelLabel();
 
       const model = availableModels.find(m => m.id === currentModelId);
@@ -988,8 +1400,8 @@ document.addEventListener('keydown', (e) => {
       return;
     }
 
-    if (state.isStreaming) {
-      wsClient.send({ type: 'abort' });
+    if (state.isStreaming && viewingActiveSession && activeLiveSessionId) {
+      wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
       messageRenderer.renderError('Aborted by user');
       showTypingIndicator(false);
     } else if (!sidebarEl.classList.contains('collapsed') && window.innerWidth <= 768) {
@@ -1038,19 +1450,7 @@ sidebarOverlay.addEventListener('click', () => {
 
 
 const newSessionBtn = document.getElementById('new-session-btn');
-newSessionBtn.addEventListener('click', () => {
-  sessionTotalCost = 0;
-  lastInputTokens = 0;
-  updateCostDisplay();
-  updateTokenUsage();
-  state.reset();
-  messageRenderer.clear();
-  toolCardRenderer.clear();
-  messageRenderer.renderWelcome();
-  sidebar.clearActive();
-  viewingActiveSession = false;
-  updateMirrorInputState();
-});
+newSessionBtn.addEventListener('click', openNewLiveSessionModal);
 
 refreshSessionsBtn.addEventListener('click', () => {
   if (isMobile()) {
@@ -1143,8 +1543,11 @@ async function switchSession(sessionFile, session = null, project = null) {
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
+    if (isMirrorMode) viewingActiveSession = false;
     
     state.reset();
+    showTypingIndicator(false);
+    updateUI();
     messageRenderer.clear();
     toolCardRenderer.clear();
 
@@ -1174,32 +1577,18 @@ async function switchSession(sessionFile, session = null, project = null) {
       messageRenderer.renderWelcome();
     }
 
-    // In mirror mode, check if this session is live on any instance
+    // In standalone mode, historical sessions are read-only. If the selected
+    // history file belongs to a live backend Tau tab, jump to that tab.
     if (isMirrorMode) {
-      // Check if this session is live on a different instance
-      const otherInstance = liveInstances.find(i => i.sessionFile === sessionFile && i.port !== new URL(wsClient.url).port * 1);
-      if (otherInstance) {
-        // Reconnect to the other instance
-        const protocol = document.location.protocol === 'https:' ? 'wss:' : 'ws:'
-        const newUrl = `${protocol}//${location.hostname}:${otherInstance.port}/ws`;
-        console.log(`[App] Switching to instance on port ${otherInstance.port}`);
-        wsClient.disconnect();
-        wsClient.url = newUrl;
-        wsClient.forceReconnect();
-        mirrorActiveSessionFile = sessionFile;
-        viewingActiveSession = true;
-        updateMirrorInputState();
+      const live = liveSessions.find(s => s.sessionFile === sessionFile);
+      if (live) {
+        await selectLiveSession(live.id);
         return;
       }
-
-      // Check if this is the active session on the current instance
-      viewingActiveSession = sessionFile === mirrorActiveSessionFile;
+      viewingActiveSession = false;
       updateMirrorInputState();
-
-      if (viewingActiveSession) {
-        // Re-request live state from the extension
-        wsClient.send({ type: 'mirror_sync_request' });
-      }
+      updateUI();
+      if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
     } else {
       const res = await fetch('/api/sessions/switch', {
         method: 'POST',
@@ -1224,19 +1613,23 @@ async function switchSession(sessionFile, session = null, project = null) {
 
 function handleMirrorSync(data) {
   console.log('[Mirror] Received state snapshot:', data.entries?.length, 'entries');
+  if (data.sessionId && data.sessionId !== activeLiveSessionId) return;
   isMirrorMode = true;
 
   // Track the active session
-  mirrorActiveSessionFile = data.sessionFile || null;
-  viewingActiveSession = true;
+  mirrorActiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
+  viewingActiveSession = !!activeLiveSessionId;
+  state.setStreaming(!!data.isStreaming);
+  showTypingIndicator(!!data.isStreaming);
   updateMirrorInputState();
+  updateUI();
   updateMirrorLiveIndicator();
 
   // Update model display
-  if (data.model) {
-    currentModelId = data.model.id || '';
+  if (data.model || data.session?.modelLabel || data.session?.modelSpec) {
+    currentModelId = (typeof data.model === 'string' ? data.model : data.model?.id) || data.session?.modelLabel || data.session?.modelSpec || '';
     updateModelLabel();
-    if (data.model.contextWindow) {
+    if (data.model?.contextWindow) {
       contextWindowSize = data.model.contextWindow;
     }
   }
@@ -1247,7 +1640,13 @@ function handleMirrorSync(data) {
     updateThinkingBtn();
   }
 
-  // Clear and render message history
+  // Clear and render message history. Reset streaming handles after the
+  // snapshot arrives because live deltas may have created a streaming element
+  // while the snapshot request was in flight; that element is about to be
+  // removed from the DOM.
+  currentStreamingElement = null;
+  currentStreamingThinking = '';
+  currentStreamingText = '';
   messageRenderer.clear();
   sessionTotalCost = 0;
   lastInputTokens = 0;
@@ -1273,36 +1672,49 @@ function updateMirrorLiveIndicator() {
   });
 }
 
-// Poll for running instances to mark all live sessions
+// Refresh live-session list for sidebar indicators if WS missed an update
 async function pollInstances() {
   try {
-    const res = await fetch('/api/instances');
+    const res = await fetch('/api/live-sessions');
     if (res.ok) {
       const data = await res.json();
-      liveInstances = data.instances || [];
-      updateMirrorLiveIndicator();
+      const wasActive = activeLiveSessionId;
+      setLiveSessions(data.sessions || []);
+      const activeSession = wasActive ? liveSessions.find(s => s.id === wasActive) : null;
+      if (wasActive && !activeSession) {
+        handleLiveSessionClosed(wasActive);
+      } else if (activeSession && viewingActiveSession) {
+        state.setStreaming(!!activeSession.isStreaming);
+        showTypingIndicator(!!activeSession.isStreaming);
+        applyActiveSessionMetadata(activeSession);
+        updateMirrorInputState();
+        updateUI();
+      }
     }
   } catch {}
 }
 
-// Poll every 5 seconds
-setInterval(pollInstances, 5000);
-pollInstances();
+// Poll every 10 seconds
+setInterval(pollInstances, 10000);
 
-// Enable/disable input based on whether we're viewing the live session
+// Enable/disable input based on whether we're viewing a live backend Tau tab
 function updateMirrorInputState() {
-  if (!isMirrorMode) return;
-
   const inputArea = document.querySelector('.input-area');
-  if (viewingActiveSession) {
+  const hasLiveSession = viewingActiveSession && !!activeLiveSessionId;
+  if (hasLiveSession) {
     messageInput.disabled = false;
+    sendBtn.disabled = false;
     messageInput.placeholder = 'Message...';
     inputArea?.classList.remove('mirror-readonly');
   } else {
     messageInput.disabled = true;
-    messageInput.placeholder = 'Viewing historical session (read-only)';
+    sendBtn.disabled = true;
+    messageInput.placeholder = isMirrorMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
     inputArea?.classList.add('mirror-readonly');
   }
+  commandBtn.disabled = !hasLiveSession;
+  modelDropdownBtn.disabled = !hasLiveSession;
+  thinkingBtn.disabled = !hasLiveSession;
 }
 
 // ═══════════════════════════════════════
@@ -1504,7 +1916,8 @@ function updateConnectionStatus(status) {
 }
 
 function updateUI() {
-  const isStreaming = state.isStreaming;
+  const hasLiveSession = !!activeLiveSessionId && viewingActiveSession;
+  const isStreaming = state.isStreaming && hasLiveSession;
 
   if (isStreaming) {
     statusIndicator.classList.add('streaming');
@@ -1516,8 +1929,8 @@ function updateUI() {
     statusText.textContent = 'Connected';
   }
 
-  messageInput.disabled = false;
-  sendBtn.disabled = false;
+  messageInput.disabled = !hasLiveSession;
+  sendBtn.disabled = !hasLiveSession;
 
   if (isStreaming) {
     abortBtn.classList.remove('hidden');
@@ -1525,7 +1938,7 @@ function updateUI() {
   } else {
     abortBtn.classList.add('hidden');
     sendBtn.classList.remove('hidden');
-    flushQueue();
+    if (hasLiveSession) flushQueue();
   }
 }
 
@@ -1585,7 +1998,7 @@ async function openSettings() {
     const resp = await fetch('/api/rpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'get_state' }),
+      body: JSON.stringify({ type: 'get_state', sessionId: activeLiveSessionId }),
     });
     const data = await resp.json();
     if (data.success && data.data) {
@@ -1596,8 +2009,7 @@ async function openSettings() {
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
       currentThinkingLevel = s.thinkingLevel || 'off';
       updateThinkingBtn();
-      // Session name
-      inputSessionName.value = s.sessionName || '';
+      // Session name is managed by Pi session history; no editable field in standalone settings.
     }
   } catch (e) {
     // Silent
@@ -1876,18 +2288,18 @@ if (isMobile()) {
 const launcherEl = document.getElementById('launcher');
 const launcher = new Launcher(launcherEl, async (projectPath) => {
   try {
-    const res = await fetch('/api/projects/launch', {
+    const res = await fetch('/api/live-sessions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: projectPath }),
+      body: JSON.stringify({ cwd: projectPath, model: '' }),
     });
     const data = await res.json();
-    if (data.ok) {
-      // Refresh the launcher to show the new active instance
-      setTimeout(() => launcher.load(), 2000);
+    if (data.session) {
+      upsertLiveSession(data.session);
+      await selectLiveSession(data.session.id);
     }
   } catch (e) {
-    console.error('[Launcher] Failed to launch:', e);
+    console.error('[Launcher] Failed to create Tau tab:', e);
   }
 });
 
@@ -1917,6 +2329,11 @@ function addLauncherNav() {
     showLauncher();
   });
   modeToggle.appendChild(launcherLink);
+}
+
+function isLauncherVisible() {
+  const el = document.getElementById('launcher');
+  return !!el && !el.classList.contains('hidden');
 }
 
 function showLauncher() {
@@ -1949,6 +2366,7 @@ document.querySelector('.mode-link:first-child')?.addEventListener('click', () =
 
 wsClient.connect();
 messageRenderer.renderWelcome();
+updateMirrorInputState();
 sidebar.loadSessions().then(() => {
   if (isMirrorMode) updateMirrorLiveIndicator();
 });

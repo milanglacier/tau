@@ -122,7 +122,7 @@ export class WebSocketClient extends EventTarget {
     // Emit events based on message type
     switch (message.type) {
       case 'event':
-        this.dispatchEvent(new CustomEvent('rpcEvent', { detail: message.event }));
+        this.dispatchEvent(new CustomEvent('rpcEvent', { detail: { sessionId: message.sessionId, event: message.event } }));
         break;
       case 'state':
         this.dispatchEvent(new CustomEvent('stateUpdate', { detail: message }));
@@ -135,6 +135,18 @@ export class WebSocketClient extends EventTarget {
         break;
       case 'mirror_sync':
         this.dispatchEvent(new CustomEvent('mirrorSync', { detail: message }));
+        break;
+      case 'response':
+        this.dispatchEvent(new CustomEvent('rpcResponse', { detail: message }));
+        break;
+      case 'live_session_created':
+        this.dispatchEvent(new CustomEvent('liveSessionCreated', { detail: message.session }));
+        break;
+      case 'live_session_updated':
+        this.dispatchEvent(new CustomEvent('liveSessionUpdated', { detail: message.session }));
+        break;
+      case 'live_session_closed':
+        this.dispatchEvent(new CustomEvent('liveSessionClosed', { detail: message }));
         break;
       default:
         console.warn('[WS] Unknown message type:', message.type);
