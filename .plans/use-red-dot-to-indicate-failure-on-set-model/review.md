@@ -132,3 +132,153 @@ overrides the orange pulsing dot.
 - The non-blocking minor note about the dropped `'Connected • TS'` suffix was
   intentionally left as-is to keep the change scoped to the two findings and
   preserve the original restore-text behavior.
+
+---
+
+## 2nd-reviewer assessment
+
+Branch: `fix/use-red-light-to-indicate-wrong-model-field`
+Commits reviewed: `288119e` and `3f7ea7e` (i.e. `git diff a06faa4..HEAD` on
+`public/app.js` and `public/style.css`).
+
+### Confirmation of prior findings
+
+Both findings from the first review are resolved.
+
+- Finding 1 (stale `disconnected` class): the enter and restore steps now use
+  atomic `statusIndicator.className = 'status-indicator <state>'` assignments
+  (`public/app.js` lines 1305 and 1312/1315), so no prior
+  `connected`/`disconnected`/`streaming` class can linger alongside `error`.
+  A reconnect during the 3 s flash now yields a clean `connected` class.
+- Finding 2 (`streaming` clobbered mid-stream): the restore branch now checks
+  `state.isStreaming` (line 1311) and re-applies `status-indicator streaming` +
+  `'Working...'` when the socket is open and a stream is in progress, instead of
+  forcing `connected`/`'Connected'`. Matches the flag `updateUI` reads.
+
+`node --check public/app.js` passes; the `.status-indicator.error` CSS rule is
+retained and is the only place the red flash gets its `connectPop` cue.
+
+### Findings
+
+#### 1. Red dot and status text desync when `set_model` succeeds but `set_thinking_level` fails
+
+`applyModelInput` runs `set_model` and `set_thinking_level` as two separate
+`rpcCommand` calls. On `set_model` success, `rpcCommand` sets the text to
+`'Done'` and schedules a **2 s** restore to `'Connected'`
+(`public/app.js` lines 1202–1203). If the subsequent `set_thinking_level` call
+fails, `applyModelInput` calls `flashStatusError(t.error)` (lines 1361–1364),
+which turns the dot red and schedules a **3 s** restore. Because the thinking
+RPC typically fails well within 2 s of the `set_model` success, the stale
+2 s `'Done'` timer fires *during* the 3 s red-dot window and overwrites the
+error text with `'Connected'`, leaving a red `error` dot next to the word
+`'Connected'` for roughly the last second of the flash.
+
+```js
+// rpcCommand, set_model success — 2s timer still pending:
+statusText.textContent = 'Done';
+setTimeout(() => { statusText.textContent = 'Connected'; }, 2000);
+// ...then thinking fails -> flashStatusError keeps the dot red for 3s
+```
+
+The text-overwrite race itself is pre-existing (`rpcCommand` has always owned
+its own restore timers), but the *visible dot/text mismatch* is introduced by
+this change: previously there was no persistent red dot, so the early text
+reset was not contradictory. This is the headline path of the feature — a
+single `provider/model[thinking]` input where the model is valid but the
+thinking level is rejected — so it is readily reachable. A minimal fix is to
+make the error flash own the text for its full duration, e.g. have
+`applyModelInput` suppress `rpcCommand`'s status messaging on the
+`set_thinking_level` failure path (or cancel/ignore `rpcCommand`'s pending
+restore when `flashStatusError` runs), rather than letting the two timer
+systems race.
+
+**Location:** `public/app.js` — `rpcCommand` lines 1202–1203 (2 s `'Done'`
+restore) interacting with `applyModelInput` lines 1361–1364 and
+`flashStatusError` lines 1302–1317.
+
+### Minor notes (not blocking)
+
+- **Overlapping flashes can clear the dot early.** Two `applyModelInput`
+  failures within 3 s (e.g. user edits to a second invalid spec and blurs
+  before the first flash elapses) schedule two independent restore timers; the
+  first restore atomically resets the dot to `connected`/`disconnected` while
+  the second error is still nominally active, briefly turning the dot green
+  before the second error's intended end. The original text-only `setTimeout`
+  had the same overlapping-timer problem for the text, but the dot-color
+  clobber is new. Narrow trigger; mention only for completeness.
+- The restore text still drops the `'Connected • TS'` suffix and
+  `statusText.title` that `updateConnectionStatus` sets (line 1949–1950). This
+  was already noted as pre-existing by the first reviewer; still applies now
+  that the helper is the single restore path for these flows.
+
+### Verdict
+
+Needs revision (minor).
+
+The first reviewer's two findings are correctly addressed: the atomic
+`className` reset eliminates the stale-class bug, and the `isStreaming`-aware
+restore preserves the streaming dot. One new, reachable desync remains on the
+feature's core path — when `set_model` succeeds and `set_thinking_level`
+fails, `rpcCommand`'s stale 2 s `'Done'` timer overwrites the error text while
+the red dot persists for 3 s, producing a red dot beside `'Connected'`. It is a
+small window and rooted in pre-existing `rpcCommand` timer behaviour, but the
+visible mismatch is introduced by this change and is worth a one-line fix to
+give the error flash ownership of the status text for its full duration.
+
+---
+
+## 2nd-reviewer fix summary
+
+Finding 1 (red dot / status text desync) addressed in `public/app.js`.
+
+### Root cause
+
+`rpcCommand` and `flashStatusError` each scheduled their own independent
+`setTimeout` restore of `statusText`, with no shared handle. On the feature's
+headline path — `set_model` succeeds (rpcCommand schedules a 2 s
+`'Done'` -> `'Connected'` restore) and then `set_thinking_level` fails
+(`flashStatusError` turns the dot red for 3 s) — the stale 2 s timer fired
+inside the 3 s red-dot window and overwrote the error text with `'Connected'`,
+producing a red `error` dot beside the word `'Connected'`.
+
+### Fix
+
+Introduced a single module-level `statusRestoreTimer` plus a
+`setStatusMessage(text, restoreText, restoreMs)` helper (`public/app.js`
+lines 41–52) that clears any previously scheduled restore before setting a
+new one. All transient `statusText` restores now flow through this helper:
+
+- `rpcCommand`: the five inline `setTimeout` restore sites (needs-live-session
+  error, `'Done'`, `data.error`, catch `'Error'`) now call `setStatusMessage`
+  (lines 1206, 1210, 1218, 1220, 1224).
+- `rpcExportHtml`: the 4 s `'Exported: ...'` restore now uses `setStatusMessage`
+  (line 1231).
+- `flashStatusError`: on entry it calls `clearTimeout(statusRestoreTimer)` and
+  schedules its own restore on the same handle (lines 1321–1323), so any
+  `rpcCommand` restore pending from an earlier successful step in the same
+  flow is cancelled before the red-dot window begins.
+
+Because every new transient message cancels the prior restore, the
+`rpcCommand` 2 s `'Done'` timer can no longer fire during the 3 s error flash,
+and the error text owns the status bar for the full duration of the red dot.
+
+### Side effect: overlapping flashes (minor note)
+
+The shared-timer approach also resolves the non-blocking "overlapping flashes
+can clear the dot early" note. Two `applyModelInput` failures within 3 s now
+cancel the first restore when the second `flashStatusError` runs, so the first
+restore can no longer atomically reset the dot to `connected`/`disconnected`
+while the second error is still active.
+
+### Verification
+
+- `node --check public/app.js` passes.
+- No DOM/browser tests exist for `app.js` (the `test/` suite is server-side
+  Node only), so no test changes were needed or applicable.
+- Left the persistent (non-transient) `statusText.textContent` assignments in
+  `updateConnectionStatus` (lines 1966, 1973, 1979) and `updateUI`
+  (lines 1990, 1994) untouched: these set durable state and do not schedule
+  restores, so routing them through `setStatusMessage` would be incorrect.
+- The non-blocking note about the dropped `'Connected • TS'` suffix remains
+  unaddressed to keep this change scoped to the desync finding; it is
+  pre-existing behavior and out of scope for this fix.

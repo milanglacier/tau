@@ -34,6 +34,23 @@ const sendBtn = document.getElementById('send-btn');
 const abortBtn = document.getElementById('abort-btn');
 const statusIndicator = document.getElementById('status-indicator');
 const statusText = document.getElementById('status-text');
+// Tracks the pending timer that restores statusText after a transient
+// status message (rpcCommand success/error, flashStatusError restore). Any
+// new status message must clear this so a stale restore cannot overwrite a
+// later, longer-lived message (e.g. the red-dot error flash).
+let statusRestoreTimer = null;
+// Set a transient statusText message and schedule its restore. Cancels any
+// previously scheduled restore so overlapping messages cannot race.
+function setStatusMessage(text, restoreText = null, restoreMs = 3000) {
+  clearTimeout(statusRestoreTimer);
+  statusText.textContent = text;
+  if (restoreText !== null) {
+    statusRestoreTimer = setTimeout(() => {
+      statusRestoreTimer = null;
+      statusText.textContent = restoreText;
+    }, restoreMs);
+  }
+}
 const sidebarEl = document.getElementById('sidebar');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarOverlay = document.getElementById('sidebar-overlay');
@@ -1186,12 +1203,11 @@ async function rpcCommand(cmd, statusMsg) {
     const needsLiveSession = !cmd.sessionId && !cmd.filePath && !backendLocalCommands.has(cmd.type);
     if (needsLiveSession && (!viewingActiveSession || !activeLiveSessionId)) {
       const error = 'Select a live Tau tab first.';
-      statusText.textContent = error;
-      setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
+      setStatusMessage(error, wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected', 3000);
       return { type: 'response', command: cmd.type, success: false, error };
     }
     if (!cmd.sessionId && viewingActiveSession && activeLiveSessionId) cmd = { ...cmd, sessionId: activeLiveSessionId };
-    if (statusMsg) statusText.textContent = statusMsg;
+    if (statusMsg) setStatusMessage(statusMsg);
     const resp = await fetch('/api/rpc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1199,24 +1215,20 @@ async function rpcCommand(cmd, statusMsg) {
     });
     const data = await resp.json();
     if (data.success) {
-      statusText.textContent = 'Done';
-      setTimeout(() => { statusText.textContent = 'Connected'; }, 2000);
+      setStatusMessage('Done', 'Connected', 2000);
     } else {
-      statusText.textContent = data.error || 'Failed';
-      setTimeout(() => { statusText.textContent = 'Connected'; }, 3000);
+      setStatusMessage(data.error || 'Failed', 'Connected', 3000);
     }
     return data;
   } catch (e) {
-    statusText.textContent = 'Error';
-    setTimeout(() => { statusText.textContent = 'Connected'; }, 3000);
+    setStatusMessage('Error', 'Connected', 3000);
   }
 }
 
 async function rpcExportHtml() {
   const data = await rpcCommand({ type: 'export_html' }, 'Exporting...');
   if (data?.success && data.data?.path) {
-    statusText.textContent = `Exported: ${data.data.path}`;
-    setTimeout(() => { statusText.textContent = 'Connected'; }, 4000);
+    setStatusMessage(`Exported: ${data.data.path}`, 'Connected', 4000);
   }
 }
 
@@ -1303,8 +1315,13 @@ function flashStatusError(msg, ms = 3000) {
   // Reset the class atomically so no stale connected/disconnected/streaming
   // class lingers alongside `error` (matches updateConnectionStatus' style).
   statusIndicator.className = 'status-indicator error';
+  // Cancel any pending status-text restore (e.g. rpcCommand's 'Done' ->
+  // 'Connected' timer from an earlier successful step in the same flow) so it
+  // cannot overwrite this error message while the red dot persists.
+  clearTimeout(statusRestoreTimer);
   statusText.textContent = msg;
-  setTimeout(() => {
+  statusRestoreTimer = setTimeout(() => {
+    statusRestoreTimer = null;
     const open = wsClient.ws?.readyState === WebSocket.OPEN;
     // Preserve an in-progress stream: restore the streaming dot instead of
     // forcing connected while state.isStreaming is true.
