@@ -436,7 +436,10 @@ async function selectLiveSession(id) {
 
 function applyActiveSessionMetadata(session) {
   if (!session) return;
-  currentModelId = session.model?.id || session.modelLabel || session.modelSpec || '';
+  // Keep the full {provider,id} object when available so modelDisplayString()
+  // can render the provider/model:thinking format; fall back to modelLabel
+  // (already 'provider/id' shaped) or the raw spec string.
+  currentModelId = session.model || session.modelLabel || session.modelSpec || '';
   currentThinkingLevel = session.thinkingLevel || 'off';
   updateModelDisplay();
 }
@@ -1295,6 +1298,13 @@ function parseModelSpec(raw) {
 }
 
 async function applyModelInput() {
+  // No-op when the user didn't actually edit anything (e.g. focus then blur,
+  // or the value was just reverted). Avoids spurious set_model/set_thinking_level
+  // RPCs and false validation errors on the current display string.
+  if (modelInput.value.trim() === modelDisplayString()) {
+    modelInput.classList.remove('invalid');
+    return;
+  }
   if (!viewingActiveSession || !activeLiveSessionId) {
     statusText.textContent = 'Select a live Tau tab first.';
     setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
@@ -1307,6 +1317,9 @@ async function applyModelInput() {
     statusText.textContent = parsed.error;
     setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
     modelInput.value = modelDisplayString();
+    // Clear the red border once the status message clears so a valid reverted
+    // value is not left marked invalid indefinitely.
+    setTimeout(() => modelInput.classList.remove('invalid'), 3000);
     return;
   }
   const r = await rpcCommand({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId }, `Switching to ${parsed.provider}/${parsed.modelId}...`);
@@ -1339,15 +1352,20 @@ async function applyModelInput() {
     statusText.textContent = (r && r.error) ? r.error : 'Unknown model';
     setTimeout(() => { statusText.textContent = wsClient.ws?.readyState === WebSocket.OPEN ? 'Connected' : 'Disconnected'; }, 3000);
     modelInput.value = modelDisplayString();
+    setTimeout(() => modelInput.classList.remove('invalid'), 3000);
   }
 }
 
+// Set by the Escape handler so the subsequent blur does not re-commit the
+// (just-reverted) value over the network.
+let suppressBlurApply = false;
 modelInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     modelInput.blur();
   } else if (e.key === 'Escape') {
     e.preventDefault();
+    suppressBlurApply = true;
     modelInput.value = modelDisplayString();
     modelInput.classList.remove('invalid');
     modelInput.blur();
@@ -1359,6 +1377,7 @@ modelInput.addEventListener('focus', () => {
 });
 modelInput.addEventListener('blur', () => {
   delete modelInput.dataset.editing;
+  if (suppressBlurApply) { suppressBlurApply = false; return; }
   applyModelInput();
 });
 
@@ -1376,7 +1395,9 @@ async function fetchModelInfo() {
     }
     if (stateData.success && stateData.data?.model) {
       const stateModel = stateData.data.model;
-      currentModelId = typeof stateModel === 'string' ? stateModel : (stateModel.id || stateModel.name || '');
+      // Preserve the object form ({provider,id}) so the input can render
+      // provider/model:thinking; only flatten to a string when it already is one.
+      currentModelId = (typeof stateModel === 'object' && stateModel) ? stateModel : (typeof stateModel === 'string' ? stateModel : '');
 
       const model = availableModels.find(m => m.id === currentModelId);
       if (model?.contextWindow) {
@@ -1637,7 +1658,9 @@ function handleMirrorSync(data) {
 
   // Update model display
   if (data.model || data.session?.modelLabel || data.session?.modelSpec) {
-    currentModelId = (typeof data.model === 'string' ? data.model : data.model?.id) || data.session?.modelLabel || data.session?.modelSpec || '';
+    // Preserve the object form ({provider,id}) so the input can render
+    // provider/model:thinking; only flatten when the server sent a string.
+    currentModelId = (typeof data.model === 'object' && data.model) ? data.model : (typeof data.model === 'string' ? data.model : (data.session?.modelLabel || data.session?.modelSpec || ''));
     if (data.model?.contextWindow) {
       contextWindowSize = data.model.contextWindow;
     }
