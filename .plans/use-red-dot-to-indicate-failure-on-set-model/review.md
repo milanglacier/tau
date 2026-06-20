@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Review: fix/use-red-light-to-indicate-wrong-model-field
 
 Branch: `fix/use-red-light-to-indicate-wrong-model-field`
@@ -636,3 +640,52 @@ catches up after the 3 s flash expires.
 - The pre-existing dropped `'Connected • TS'` suffix / `statusText.title`
   (set by `updateConnectionStatus`) remains unaddressed to keep the change
   scoped; it predates this branch.
+
+---
+
+## 5th-reviewer assessment
+
+Branch: `fix/use-red-light-to-indicate-wrong-model-field`
+Commits reviewed: `288119e`, `3f7ea7e`, `6c24f18`, `a672bc3`, `1d66ace` (i.e.
+`git diff main..HEAD` on `public/app.js` and `public/style.css`).
+
+### Confirmation of prior findings
+
+All four earlier findings are resolved in the current tree.
+
+- **Finding 1** (stale `disconnected` class) and **finding 2** (`streaming`
+  clobbered on restore): `flashStatusError` uses atomic
+  `statusIndicator.className = 'status-indicator error'` on entry
+  (`public/app.js` line 1340) and delegates restore to
+  `restoreStatusIndicator()` (lines 54–59), which derives the current
+  `connected`/`disconnected`/`streaming` state.
+- **2nd-reviewer finding** (red dot / status text desync when `set_model`
+  succeeds but `set_thinking_level` fails): the shared `statusRestoreTimer` +
+  `setStatusMessage` helper (lines 41–52 / 63–76) cancels `rpcCommand`'s
+  pending `'Done'` -> `'Connected'` restore, and the intermediate
+  `setStatusMessage('Setting thinking...')` clears it even earlier.
+- **3rd-reviewer finding** (stranded red dot when an unrelated
+  `setStatusMessage` cancels the flash restore): `statusFlashTimer` is
+  separate from `statusRestoreTimer` (lines 47, 63–76). `setStatusMessage`
+  retires an active flash explicitly via `restoreStatusIndicator()`, so the
+  dot cannot be left red indefinitely.
+- **4th-reviewer finding** (`updateUI` overwriting status text during a
+  red-dot flash): `updateUI` guards its status-bar writes with
+  `statusFlashTimer === null` (lines 2014–2029), so poll and stream snapshots
+  no longer paint `'Connected'` or `'Working...'` over an active error
+  message.
+
+`node --check public/app.js` passes.
+
+### Findings
+
+None.
+
+### Verdict
+
+Correct as-is.
+
+The status indicator and timer logic is now fully consistent: no stale CSS
+classes, no stranded timers, no text/dot desyncs, and `updateUI` correctly
+defers to an active flash while `setStatusMessage` correctly retires a stale
+one. No new issues were found in this round.
