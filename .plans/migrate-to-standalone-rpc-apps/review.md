@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 ## Findings
 
 ### Finalize streaming messages from the completed payload

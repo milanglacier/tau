@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Review — commit `fc7db76` "chore: add tests."
 
 Scope: the commit in full — 10 test files under `test/`, the `bin/tau.js`
