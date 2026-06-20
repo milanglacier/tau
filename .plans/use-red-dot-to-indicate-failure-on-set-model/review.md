@@ -485,3 +485,154 @@ Split the flash's indicator restore off the shared text-timer handle and gave
 - The pre-existing dropped `'Connected • TS'` suffix / `statusText.title`
   (set by `updateConnectionStatus`) remains unaddressed to keep the change
   scoped; it predates this branch.
+
+---
+
+## 4th-reviewer assessment
+
+Branch: `fix/use-red-light-to-indicate-wrong-model-field`
+Commits reviewed: `288119e`, `3f7ea7e`, `6c24f18`, `a672bc3` (i.e.
+`git diff main..HEAD` on `public/app.js` and `public/style.css`).
+
+### Confirmation of prior findings
+
+All three earlier findings are resolved in the current tree.
+
+- Finding 1 (stale `disconnected` class) and finding 2 (`streaming` clobbered
+  on restore): `flashStatusError` now uses atomic
+  `statusIndicator.className = 'status-indicator error'` on entry
+  (`public/app.js` line 1340) and delegates restore to
+  `restoreStatusIndicator()` (lines 1357, 57–59), which picks the current
+  `connected`/`disconnected`/`streaming` state.
+- 2nd-reviewer finding (red dot / status text desync when `set_model` succeeds
+  but `set_thinking_level` fails): the shared `statusRestoreTimer` +
+  `setStatusMessage` helper (lines 41–52 / 63–76) cancels `rpcCommand`'s
+  pending `'Done'` -> `'Connected'` restore on entry, and the intermediate
+  `setStatusMessage('Setting thinking...')` clears it even earlier.
+- 3rd-reviewer finding (stranded red dot when an unrelated
+  `setStatusMessage` cancels the flash restore): `statusFlashTimer` is now
+  separate from `statusRestoreTimer` (lines 47, 63–76). `setStatusMessage`
+  retires an active flash explicitly instead of cancelling its only restore,
+  so the dot cannot be left red indefinitely.
+
+`node --check public/app.js` passes.
+
+### Findings
+
+#### 1. `updateUI` overwrites the status text during a red-dot flash, producing a red dot beside `'Connected'`
+
+`updateUI()` in `public/app.js` runs on every stream snapshot and on the
+~10 s `pollInstances` timer (`setInterval` at line 1791). It always writes
+the status bar from scratch:
+
+```js
+statusIndicator.classList.remove('streaming');
+statusIndicator.classList.add('connected');
+statusText.textContent = 'Connected';
+```
+
+(`public/app.js` lines 2019–2021). It never removes the `error` class, and
+because `.status-indicator.error` is declared *after*
+`.status-indicator.connected` in `public/style.css` (lines 1169 vs. 1152),
+the dot stays red when both classes are present. So if the 10 s poll fires
+inside the 3 s `flashStatusError` window — roughly a 30 % chance for any
+error flash where the user takes no other action — the status text flips to
+`'Connected'` while the indicator remains red until `statusFlashTimer` fires.
+
+Before this branch, `updateUI` already clobbered transient error text with
+`'Connected'`, but there was no persistent red dot to mismatch. The new
+`.error` class makes the stale text state visually contradictory.
+
+The fix is small and consistent with the rest of the change: guard the
+status-bar writes in `updateUI` so they do not run while `statusFlashTimer`
+is active. The remaining `updateUI` work (disabling inputs, showing the abort
+button, etc.) should still run.
+
+```js
+if (statusFlashTimer === null) {
+  if (isStreaming) { /* streaming status ... */ }
+  else { /* connected status ... */ }
+}
+```
+
+This keeps the error flash in control of the status bar for its full 3 s,
+mirroring how `setStatusMessage` now supersedes the flash only when a new,
+explicit status message arrives.
+
+**Location:** `public/app.js` — `updateUI` status block lines 2014–2029,
+reachable via `setInterval(pollInstances, 10000)` at line 1791 and stream
+snapshot callers.
+
+### Verdict
+
+Needs revision (minor).
+
+The status-indicator/timer logic is now sound: no stale classes, no stranded
+red dot, and no `rpcCommand` text timer can race the error message. The one
+remaining gap is that `updateUI`'s periodic and stream-driven status writes
+are unaware of the active flash, so they can paint `'Connected'` over the
+error text while the red dot persists. Guarding those writes with the
+existing `statusFlashTimer` flag closes the last visible desync without
+affecting the rest of `updateUI`.
+
+---
+
+## 4th-reviewer fix summary
+
+Finding 1 (`updateUI` overwriting the status text during a red-dot flash,
+producing a red dot beside `'Connected'`) addressed in `public/app.js`.
+
+### Root cause
+
+`flashStatusError` now owns the status indicator (red `error` class) and
+`statusText` for a full 3 s via `statusFlashTimer`. However, `updateUI()`
+(`public/app.js` lines 2010–2029) also writes the status bar on every stream
+snapshot and on the ~10 s `pollInstances` timer (`setInterval` at line 1791).
+It sets `statusText.textContent = 'Connected'` and adds the `connected` class
+without removing `error`. Because `.status-indicator.error` is declared after
+`.status-indicator.connected` in `public/style.css` (lines 1169 vs. 1152), the
+dot stayed red while the text read `'Connected'` for the remainder of the
+flash window. Before this branch there was no persistent red dot, so the text
+clobber was not visually contradictory.
+
+### Fix
+
+Guarded the status-bar block in `updateUI` so it only runs when no error flash
+is active:
+
+```js
+if (statusFlashTimer === null) {
+  if (isStreaming) { /* streaming dot + 'Working...' */ }
+  else { /* connected dot + 'Connected' */ }
+}
+```
+
+The rest of `updateUI` (disabling `messageInput`/`sendBtn`, toggling the abort
+button, etc.) continues to run normally. The flash's own restore callback
+(`flashStatusError`, lines 1355–1362) re-derives the correct
+`connected`/`disconnected`/`streaming` state when it fires, so the status bar
+catches up after the 3 s flash expires.
+
+### Side effects
+
+- The non-streaming poll path can no longer paint `'Connected'` over an active
+  error message, removing the red-dot / text mismatch.
+- The streaming path is also guarded, so a stream snapshot during a flash no
+  longer overwrites the error text with `'Working...'` and flips the dot to
+  the streaming accent. The 3rd-reviewer's non-blocking "mid-stream error
+  feedback is lost" note is therefore resolved as well.
+- `updateConnectionStatus` (WS open/close) still resets the indicator and text
+  unconditionally: a connection-state change is more important than a transient
+  error flash and is the correct source of truth.
+- `setStatusMessage` continues to explicitly retire an active flash via
+  `restoreStatusIndicator()`, so user-initiated actions still supersede stale
+  flashes as intended.
+
+### Verification
+
+- `node --check public/app.js` passes.
+- No DOM/browser tests exist for `app.js` (the `test/` suite is server-side
+  Node only), so no test changes were needed or applicable.
+- The pre-existing dropped `'Connected • TS'` suffix / `statusText.title`
+  (set by `updateConnectionStatus`) remains unaddressed to keep the change
+  scoped; it predates this branch.

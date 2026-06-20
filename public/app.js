@@ -2011,14 +2011,21 @@ function updateUI() {
   const hasLiveSession = !!activeLiveSessionId && viewingActiveSession;
   const isStreaming = state.isStreaming && hasLiveSession;
 
-  if (isStreaming) {
-    statusIndicator.classList.add('streaming');
-    statusIndicator.classList.remove('connected');
-    statusText.textContent = 'Working...';
-  } else {
-    statusIndicator.classList.remove('streaming');
-    statusIndicator.classList.add('connected');
-    statusText.textContent = 'Connected';
+  // Don't clobber an active red-dot error flash: it owns both the indicator
+  // class and statusText for its full 3 s. The flash's restore callback
+  // re-derives the current connection/streaming state, so skipping here is
+  // safe. Other UI updates below (input enabling, abort button, etc.) still
+  // run normally.
+  if (statusFlashTimer === null) {
+    if (isStreaming) {
+      statusIndicator.classList.add('streaming');
+      statusIndicator.classList.remove('connected');
+      statusText.textContent = 'Working...';
+    } else {
+      statusIndicator.classList.remove('streaming');
+      statusIndicator.classList.add('connected');
+      statusText.textContent = 'Connected';
+    }
   }
 
   messageInput.disabled = !hasLiveSession;
