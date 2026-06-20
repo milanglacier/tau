@@ -202,7 +202,8 @@ class PiRpcSession {
     }
     const args = ['--mode', 'rpc'];
     if (this.modelSpec) args.push('--model', this.modelSpec);
-    this.child = spawn('pi', args, {
+    const spawnFn = _spawnPiForTest || spawn;
+    this.child = spawnFn('pi', args, {
       cwd: this.cwd,
       env: { ...process.env, TAU_DISABLED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -1112,14 +1113,56 @@ async function shutdown(signal) {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2500).unref();
 }
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('exit', () => {
-  for (const session of liveManager.sessions.values()) {
-    try { session.child?.kill('SIGTERM'); } catch {}
-  }
-});
-process.on('uncaughtException', (err) => { console.error(err); shutdown('uncaughtException'); });
-process.on('unhandledRejection', (err) => { console.error(err); });
+if (require.main === module) {
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('exit', () => {
+    for (const session of liveManager.sessions.values()) {
+      try { session.child?.kill('SIGTERM'); } catch {}
+    }
+  });
+  process.on('uncaughtException', (err) => { console.error(err); shutdown('uncaughtException'); });
+  process.on('unhandledRejection', (err) => { console.error(err); });
+  listen(PORT);
+}
 
-listen(PORT);
+// Test-only helper to reset module-level auth state between cases.
+function _setAuthForTest(enabled) { authEnabled = !!enabled; }
+
+// Test-only hook to substitute the `pi` spawn so LiveSessionManager.create()
+// can be exercised without launching a real Pi process.
+let _spawnPiForTest = null;
+function _setSpawnPiForTest(fn) { _spawnPiForTest = fn || null; }
+
+module.exports = {
+  parseArgs,
+  expandHome,
+  loadTauSettings,
+  modelLabel,
+  makeId,
+  PiRpcSession,
+  LiveSessionManager,
+  liveManager,
+  resolveSessionFile,
+  appendSessionName,
+  updateLiveSessionName,
+  isWithinPath,
+  resolveLiveSessionPath,
+  resolveExportOutputPath,
+  resolveExportedSessionPath,
+  resolveOpenPath,
+  openUrl,
+  handleRpcCommand,
+  isAllowedApiOrigin,
+  setCorsForAllowedOrigin,
+  handleApiRoute,
+  serveStaticFile,
+  server,
+  wss,
+  computeUrls,
+  listen,
+  SESSIONS_DIR,
+  PI_AGENT_DIR,
+  _setAuthForTest,
+  _setSpawnPiForTest,
+};
