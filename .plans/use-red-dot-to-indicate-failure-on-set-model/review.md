@@ -282,3 +282,206 @@ while the second error is still active.
 - The non-blocking note about the dropped `'Connected • TS'` suffix remains
   unaddressed to keep this change scoped to the desync finding; it is
   pre-existing behavior and out of scope for this fix.
+
+---
+
+## 3rd-reviewer assessment
+
+Branch: `fix/use-red-light-to-indicate-wrong-model-field`
+Commits reviewed: `288119e`, `3f7ea7e`, `6c24f18` (i.e. `git diff 2928c67..HEAD`
+on `public/app.js` and `public/style.css`).
+
+### Confirmation of prior findings
+
+Both earlier findings are resolved in the current tree.
+
+- Finding 1 (stale `disconnected` class) and finding 2 (`streaming` clobbered
+  on restore): `flashStatusError` now uses atomic
+  `statusIndicator.className = 'status-indicator <state>'` resets on both enter
+  (`public/app.js` line 1317) and restore (lines 1329/1333), and the restore
+  checks `state.isStreaming` (line 1327) to preserve the streaming dot.
+- 2nd-reviewer finding (red dot / status text desync when `set_model` succeeds
+  but `set_thinking_level` fails): the shared `statusRestoreTimer` +
+  `setStatusMessage` helper (lines 41–52) ensures `flashStatusError` cancels
+  `rpcCommand`'s pending `'Done'` -> `'Connected'` restore on entry
+  (line 1321). On the headline path the stale 2 s text timer is in fact
+  cancelled even earlier — the `set_thinking_level` call's intermediate
+  `setStatusMessage('Setting thinking...')` (line 1376 via `rpcCommand` line
+  1210) clears it before the thinking fetch even resolves — so the error text
+  owns the bar for the full 3 s. Verified by tracing the call sequence.
+
+`node --check public/app.js` passes.
+
+### Findings
+
+#### 1. Any unrelated `setStatusMessage` call during the 3 s red-dot window cancels the flash restore, leaving the dot stuck red
+
+The shared `statusRestoreTimer` is now the single handle for both
+`setStatusMessage` restores and `flashStatusError`'s restore. `setStatusMessage`
+clears that handle on every call (line 45) but **never touches
+`statusIndicator.className`** — only the flash's restore callback (lines
+1323–1334) is responsible for removing the `error` class. So if any other
+status update lands during the 3 s flash, it cancels the only callback that
+would have turned the dot green again, and nothing else resets the class.
+
+This is readily reachable on the feature's own path. A user who enters an
+invalid thinking level (e.g. `provider/model[bad]`) and blurs gets `set_model`
+succeeding then `set_thinking_level` failing → `flashStatusError` (red dot,
+3 s restore pending). The natural next action is to click the thinking-level
+cycle button in the settings panel (`btnThinkingLevel`, `public/app.js` lines
+2114–2120), which calls `rpcCommand({ type: 'cycle_thinking_level' })` with no
+status message; on success `rpcCommand` runs `setStatusMessage('Done',
+'Connected', 2000)` (line 1218), which calls `clearTimeout(statusRestoreTimer)`
+and cancels the flash restore. The `statusIndicator` element still has
+`class="status-indicator error"`, so the dot stays red while the text reads
+`'Done'` then `'Connected'`. The same trap fires via the Compact command
+(palette entry line 1162 / button line 1943, `setStatusMessage('Compacting...')`
+then `'Done'`), `set_auto_compaction` (line 2110), and `set_auth` (line 2141).
+
+The stuck state does not self-heal: `updateUI` (the only thing the 10 s poll
+at line 1740 runs, and what stream events call) uses incremental
+`classList.add('connected')` / `remove('streaming')` (lines 1988, 1993) and
+never removes `error`, so with `error` + `connected` both present the dot stays
+red (`.status-indicator.error` is declared after `.status-indicator.connected`
+in `public/style.css`, lines 1171 vs. 1155, so it wins on equal specificity).
+Only `updateConnectionStatus` (WS open/close, line 1962) does a full
+`className =` reset, so on a stable connection the dot can remain red
+indefinitely.
+
+This is a regression introduced by `6c24f18`. In the 2nd-reviewer state
+(`3f7ea7e`), `flashStatusError`'s restore was on an independent `setTimeout`
+that `rpcCommand`'s inline timers could not cancel, so the dot always restored
+after 3 s; the unification that fixed the 1-second text race over-corrected and
+made the flash's indicator restore cancellable by any unrelated status update.
+
+A minimal fix keeps the flash's indicator-restore off the shared text-timer
+handle (e.g. a separate `flashRestoreTimer` that `setStatusMessage` does not
+clear), and/or makes `setStatusMessage` clear the `error` class on the
+indicator when it starts a new non-error message — mirroring the atomic reset
+`updateConnectionStatus` already uses.
+
+**Location:** `public/app.js` — `setStatusMessage` lines 44–52 (clears shared
+handle, no indicator reset) interacting with `flashStatusError` restore lines
+1323–1334; reachable via `rpcCommand` success line 1218 and intermediate line
+1210, and callers at lines 1162, 1943, 2110, 2115, 2141.
+
+### Minor notes (not blocking)
+
+- **Mid-stream error feedback is lost.** `modelInput` is never disabled while
+  streaming (`updateMirrorInputState` keys only on `hasLiveSession`), so an
+  invalid model blur mid-stream calls `flashStatusError`, but the next stream
+  snapshot runs `updateUI` which does `classList.add('streaming')` without
+  removing `error` and overwrites `statusText` with `'Working...'` (lines
+  1988, 1990). Because `.status-indicator.streaming` is declared after
+  `.status-indicator.error` (`public/style.css` lines 1174 vs. 1171), the dot
+  flips back to the streaming accent immediately and the error text is
+  overwritten. The text clobber is pre-existing (`updateUI` always owned the
+  streaming text); only the brief red-dot suppression is new. Mentioned for
+  completeness, not as a blocker.
+
+### Verdict
+
+Needs revision (minor).
+
+The two prior findings are correctly resolved and the text-desync on the
+headline `set_model`-succeeds / `set_thinking_level`-fails path is fixed.
+However, unifying all restores under one `statusRestoreTimer` handle made the
+flash's indicator restore cancellable by any unrelated `setStatusMessage`
+call — most naturally the thinking-level cycle button the user clicks right
+after a thinking-level failure — leaving the `error` class on the indicator
+with no timer to clear it and no self-heal in `updateUI`, so the dot stays red
+indefinitely on a stable connection. Routing the flash's indicator restore off
+the shared handle (or having `setStatusMessage` reset the `error` class) closes
+the regression while preserving the desync fix.
+
+---
+
+## 3rd-reviewer fix summary
+
+Finding 1 (stranded red dot when an unrelated `setStatusMessage` cancels the
+flash restore) addressed in `public/app.js`.
+
+### Root cause
+
+`6c24f18` unified every transient `statusText` restore — `rpcCommand`'s,
+`rpcExportHtml`'s, and `flashStatusError`'s indicator+text restore — under a
+single `statusRestoreTimer` handle. `setStatusMessage` clears that handle on
+every call but never touches `statusIndicator.className`, so the flash's
+restore callback was the *only* code path that removed the `error` class.
+When an unrelated status update landed during the 3 s red-dot window (most
+naturally the user clicking the thinking-level cycle button right after a
+thinking-level failure → `rpcCommand` success → `setStatusMessage('Done',
+'Connected', 2000)`), it cancelled the flash's restore to clear the text
+timer, leaving `class="status-indicator error"` on the dot with no timer to
+clear it. `updateUI` (the only thing the 10 s poll and stream events run)
+uses incremental `classList.add('connected')` and never removes `error`, and
+`.status-indicator.error` wins the CSS tie over `.status-indicator.connected`
+(declared later, equal specificity), so on a stable connection the dot stayed
+red indefinitely until a WS open/close triggered `updateConnectionStatus`.
+
+### Fix
+
+Split the flash's indicator restore off the shared text-timer handle and gave
+`setStatusMessage` explicit responsibility for retiring a superseded flash.
+
+- New module-level `statusFlashTimer` (`public/app.js` line 47), separate
+  from `statusRestoreTimer`. `setStatusMessage` does **not** clear it as part
+  of its normal text-timer cancellation, so an unrelated status update can no
+  longer cancel the only callback that clears the `error` class.
+- New `restoreStatusIndicator()` helper (lines 54–59) that resets
+  `statusIndicator.className` atomically to `connected`/`disconnected`/
+  `streaming` based on `wsClient.ws.readyState` and `state.isStreaming` — the
+  same state-derivation `updateUI` uses. It touches only the indicator class,
+  not `statusText`, so callers keep control of the accompanying text.
+- `setStatusMessage` (lines 63–76) now checks `statusFlashTimer !== null` on
+  entry: if a flash is active, it clears `statusFlashTimer`, calls
+  `restoreStatusIndicator()` to return the dot to its real state, then sets
+  the new text. A new status message thus supersedes a stale error flash
+  cleanly — the dot leaves red immediately and the new action's text shows —
+  rather than stranding the red dot.
+- `flashStatusError` (lines 1341–1361) now schedules its dot+text restore on
+  `statusFlashTimer` instead of `statusRestoreTimer`, and clears any prior
+  `statusFlashTimer` on entry so overlapping flashes (a second
+  `applyModelInput` failure within 3 s) cannot leak a stray restore that
+  would reset the dot before the second flash's own restore fires — preserving
+  the 2nd-reviewer's resolution of the overlapping-flashes minor note.
+
+### Scenario trace
+
+- **Headline desync (2nd reviewer, still fixed):** `set_model` success →
+  `setStatusMessage('Done','Connected',2000)` schedules on
+  `statusRestoreTimer` (`statusFlashTimer` is null, so the flash-cancel block
+  is skipped). `set_thinking_level` runs `setStatusMessage('Setting
+  thinking...')` (clears the text timer). Thinking fails → `flashStatusError`
+  clears `statusRestoreTimer`, turns the dot red, schedules on
+  `statusFlashTimer`. No text restore is pending, so the error text owns the
+  bar for the full 3 s.
+- **3rd-reviewer stranded dot (now fixed):** thinking fails → flash (red,
+  `statusFlashTimer` set). User clicks the thinking-level cycle button →
+  `rpcCommand({type:'cycle_thinking_level'})` (no status message) resolves →
+  `setStatusMessage('Done','Connected',2000)` sees `statusFlashTimer !== null`,
+  clears it, calls `restoreStatusIndicator()` (dot → green), then sets
+  `'Done'`. The dot is no longer red. The same retirement fires for the
+  Compact command (`setStatusMessage('Compacting...')` at the call start),
+  `set_auto_compaction`, and `set_auth`.
+- **Overlapping flashes (minor note, still fixed):** a second
+  `flashStatusError` within 3 s clears the first `statusFlashTimer` before
+  scheduling its own, so only the second restore fires and the dot stays red
+  for the full second flash.
+
+### Verification
+
+- `node --check public/app.js` passes.
+- No DOM/browser tests exist for `app.js` (the `test/` suite is server-side
+  Node only), so no test changes were needed or applicable.
+- The non-blocking minor note about mid-stream error feedback (`updateUI`
+  adding `streaming` alongside `error` during an active stream, with
+  `.status-indicator.streaming` winning the CSS tie and overwriting the
+  error text with `'Working...'`) is intentionally left unaddressed: the text
+  clobber is pre-existing (`updateUI` has always owned the streaming text),
+  only the brief red-dot suppression is new, and the flash's
+  `statusFlashTimer` restore still fires at 3 s to reset the indicator. Out
+  of scope for this fix.
+- The pre-existing dropped `'Connected • TS'` suffix / `statusText.title`
+  (set by `updateConnectionStatus`) remains unaddressed to keep the change
+  scoped; it predates this branch.

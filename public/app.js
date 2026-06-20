@@ -35,13 +35,36 @@ const abortBtn = document.getElementById('abort-btn');
 const statusIndicator = document.getElementById('status-indicator');
 const statusText = document.getElementById('status-text');
 // Tracks the pending timer that restores statusText after a transient
-// status message (rpcCommand success/error, flashStatusError restore). Any
-// new status message must clear this so a stale restore cannot overwrite a
-// later, longer-lived message (e.g. the red-dot error flash).
+// status message (rpcCommand success/error). Any new status message must
+// clear this so a stale restore cannot overwrite a later, longer-lived
+// message (e.g. the red-dot error flash).
 let statusRestoreTimer = null;
+// Tracks the pending timer that restores the status indicator (dot) and
+// text after a red-dot error flash. Kept SEPARATE from statusRestoreTimer
+// so a normal setStatusMessage call cannot cancel the only callback that
+// would clear the `error` class — otherwise an unrelated status update
+// during the 3s flash would strand the dot red with no timer to reset it.
+let statusFlashTimer = null;
+// Restore the status indicator dot to its real connection/streaming state.
+// Only touches the indicator class (not statusText), so callers can set the
+// accompanying text themselves.
+function restoreStatusIndicator() {
+  const open = wsClient.ws?.readyState === WebSocket.OPEN;
+  statusIndicator.className = `status-indicator ${
+    open && state.isStreaming ? 'streaming' : (open ? 'connected' : 'disconnected')
+  }`;
+}
 // Set a transient statusText message and schedule its restore. Cancels any
-// previously scheduled restore so overlapping messages cannot race.
+// previously scheduled restore so overlapping messages cannot race. A new
+// status message also supersedes any active error flash: it cancels the
+// flash's restore and returns the dot to its real state so the `error`
+// class cannot linger with no timer to clear it.
 function setStatusMessage(text, restoreText = null, restoreMs = 3000) {
+  if (statusFlashTimer !== null) {
+    clearTimeout(statusFlashTimer);
+    statusFlashTimer = null;
+    restoreStatusIndicator();
+  }
   clearTimeout(statusRestoreTimer);
   statusText.textContent = text;
   if (restoreText !== null) {
@@ -1319,19 +1342,23 @@ function flashStatusError(msg, ms = 3000) {
   // 'Connected' timer from an earlier successful step in the same flow) so it
   // cannot overwrite this error message while the red dot persists.
   clearTimeout(statusRestoreTimer);
+  // Cancel any prior flash restore so overlapping flashes (a second
+  // applyModelInput failure within 3s) cannot leak a stray restore that
+  // would reset the dot before this flash's own restore fires.
+  clearTimeout(statusFlashTimer);
   statusText.textContent = msg;
-  statusRestoreTimer = setTimeout(() => {
-    statusRestoreTimer = null;
+  // Schedule the dot+text restore on the dedicated statusFlashTimer so a
+  // later setStatusMessage (e.g. the user clicking the thinking-level cycle
+  // button right after a thinking-level failure) cannot cancel the only
+  // callback that clears the `error` class. If a new status message does
+  // arrive, setStatusMessage itself retires the flash via restoreStatusIndicator.
+  statusFlashTimer = setTimeout(() => {
+    statusFlashTimer = null;
+    restoreStatusIndicator();
     const open = wsClient.ws?.readyState === WebSocket.OPEN;
-    // Preserve an in-progress stream: restore the streaming dot instead of
-    // forcing connected while state.isStreaming is true.
-    if (open && state.isStreaming) {
-      statusIndicator.className = 'status-indicator streaming';
-      statusText.textContent = 'Working...';
-    } else {
-      statusIndicator.className = `status-indicator ${open ? 'connected' : 'disconnected'}`;
-      statusText.textContent = open ? 'Connected' : 'Disconnected';
-    }
+    // Preserve an in-progress stream: restore the streaming text too.
+    statusText.textContent = (open && state.isStreaming) ? 'Working...'
+      : (open ? 'Connected' : 'Disconnected');
   }, ms);
 }
 
