@@ -7,3 +7,4 @@ node_modules/
 # Pi session exports
 pi-session-*.html
 references/pi-development-guide.md
+.tags
