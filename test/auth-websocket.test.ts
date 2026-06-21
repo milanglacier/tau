@@ -51,7 +51,7 @@ function connect() {
 // Arm a one-shot message listener and return a promise that resolves with the
 // next received message. Must be called BEFORE the action that triggers the
 // broadcast, so the listener is attached before the event fires.
-function armNextMessage(ws, timeout = 2000) {
+function armNextMessage(ws, timeout = 2000): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for WS message')), timeout);
     ws.once('message', (data) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });

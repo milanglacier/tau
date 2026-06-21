@@ -53,7 +53,7 @@ beforeEach(() => {
   liveManager.sessions.clear();
 });
 
-function connect(opts = {}) {
+function connect(opts: any = {}) {
   const headers = opts.headers || {};
   if (opts.origin !== null) headers.Origin = opts.origin ?? base;
   headers.Host = new URL(base).host;
@@ -61,7 +61,7 @@ function connect(opts = {}) {
   return ws;
 }
 
-function nextMessage(ws, timeout = 2000) {
+function nextMessage(ws, timeout = 2000): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for WS message')), timeout);
     ws.once('message', (data) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });

@@ -49,6 +49,7 @@ function injectSession(overrides = {}) {
     isStreaming: false,
     sessionFile: SESSION_FILE,
     sessionName: null,
+    titleSet: false,
     entries: [{ type: 'message', message: { role: 'user', content: 'hi' } }],
     contextUsage: null,
     metadata: () => ({

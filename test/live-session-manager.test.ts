@@ -17,7 +17,7 @@ function closedClient() {
   return { readyState: WebSocket.CLOSING, sent: [], send: () => { throw new Error('should not send to closed client'); } };
 }
 
-function fakeSession(id, opts = {}) {
+function fakeSession(id, opts: any = {}) {
   const meta = {
     id,
     pid: 123,
