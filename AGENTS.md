@@ -22,3 +22,17 @@ Expected content:
 - Relevant context about where the issue appears, if it helps identify the area in the future.
 
 Avoid turning the note into a step-by-step implementation plan. Do not include granular patch instructions.
+
+## Model strings are two separate fields — don't parse or split them
+
+Pi's API always sends the model as a structured object with separate `provider`
+and `id` fields (e.g. `{provider: "openrouter", id: "z-ai/glm-5.2"}`). The
+provider is the backend that serves the model. The id is the model name as that
+provider knows it, and it can contain slashes — `z-ai/glm-5.2` is a single
+model name, not two things. Do not split the id on slashes or treat its
+segments as meaningful.
+
+When displaying the model in the UI, join them as `provider/id` — which
+naturally produces `openrouter/z-ai/glm-5.2`. When adding a thinking level for
+the model input box, append `:level` to the full string:
+`openrouter/z-ai/glm-5.2:high`.

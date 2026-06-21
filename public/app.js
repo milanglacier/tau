@@ -1287,6 +1287,10 @@ function modelDisplayString() {
     provider = currentModelId.provider || '';
     modelId = currentModelId.id || '';
   } else {
+    // Legacy fallback: a bare string is ambiguous when model names contain
+    // slashes (e.g. openrouter/z-ai/glm-5.2). Split ONCE on the first slash
+    // to separate provider from the rest, because the server normalizes
+    // everything into {provider, id} objects before it reaches us.
     const str = String(currentModelId);
     const slashIdx = str.indexOf('/');
     if (slashIdx === -1) {
@@ -1315,18 +1319,30 @@ function parseModelSpec(raw) {
   if (!trimmed) {
     return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
   }
-  const match = trimmed.match(/^([^\/:]+)\/([^\/:]+)(:([a-zA-Z]+))?$/);
-  if (!match) {
+  // Model IDs can contain slashes (e.g. OpenRouter "z-ai/glm-5.2"), so the
+  // input format is provider/<rest...>[:level]. Split on the FIRST slash to
+  // separate provider, then split off the optional :level suffix from the end.
+  const firstSlash = trimmed.indexOf('/');
+  if (firstSlash === -1) {
     return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
   }
-  const provider = match[1];
-  const modelId = match[2];
+  const provider = trimmed.slice(0, firstSlash);
+  const rest = trimmed.slice(firstSlash + 1);
+  if (!rest) {
+    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
+  }
+  let modelId = rest;
   let thinking = null;
-  if (match[4]) {
-    thinking = match[4].toLowerCase();
-    if (!VALID_THINKING_LEVELS.has(thinking)) {
-      return { error: 'Invalid thinking level. Use one of: off, minimal, low, medium, high, xhigh' };
+  const lastColon = rest.lastIndexOf(':');
+  if (lastColon !== -1) {
+    const candidate = rest.slice(lastColon + 1).toLowerCase();
+    if (VALID_THINKING_LEVELS.has(candidate)) {
+      thinking = candidate;
+      modelId = rest.slice(0, lastColon);
     }
+  }
+  if (!modelId) {
+    return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
   }
   return { provider, modelId, thinking };
 }

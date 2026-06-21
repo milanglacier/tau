@@ -239,6 +239,10 @@ test('normalizeModel parses provider/id strings and keeps full objects', () => {
   });
   assert.deepEqual(normalizeModel({ id: 'gpt-4o' }), { provider: '', id: 'gpt-4o' });
   assert.equal(normalizeModel({ foo: 'bar' }), null);
+  // Model IDs containing slashes: split on first slash only.
+  assert.deepEqual(normalizeModel('openrouter/z-ai/glm-5.2'), {
+    provider: 'openrouter', id: 'z-ai/glm-5.2',
+  });
 });
 
 test('parseModelSpecToModel parses provider/id[:level]', () => {
@@ -253,6 +257,13 @@ test('parseModelSpecToModel parses provider/id[:level]', () => {
   const r = parseModelSpecToModel('anthropic/claude-3.5:sonnet');
   assert.equal(r.level, null);
   assert.deepEqual(r.model, { provider: 'anthropic', id: 'claude-3.5:sonnet' });
+  // Model IDs that themselves contain slashes (e.g. OpenRouter "z-ai/glm-5.2").
+  assert.deepEqual(parseModelSpecToModel('openrouter/z-ai/glm-5.2:high'), {
+    model: { provider: 'openrouter', id: 'z-ai/glm-5.2' }, level: 'high',
+  });
+  assert.deepEqual(parseModelSpecToModel('openrouter/z-ai/glm-5.2'), {
+    model: { provider: 'openrouter', id: 'z-ai/glm-5.2' }, level: null,
+  });
 });
 
 test('updateStateFromResponse stores a full {provider,id} object, never a bare string', () => {

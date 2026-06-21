@@ -83,15 +83,16 @@ Because the server is canonical, the client's object-vs-string merge ternaries a
 - `modelLabel()` (line 132) stays for `metadata().modelLabel` (simplifies since input is always object-or-null).
 - Keep `updateStateFromResponse`'s `set_model`/`cycle_model` object assignment + the `else if (data.provider && data.id)` guard.
 
-### 2. Client `public/app.js` — assign directly, drop merges
+### 2. Client `public/app.js` — assign directly, drop merges, fix multi-slash model parsing
 
 - **`applyActiveSessionMetadata` (482–483)** — KEEP (multi-client sync). Simplify to `currentModelId = session.model || ''; currentThinkingLevel = session.thinkingLevel || 'off'; updateModelDisplay();`. Remove `modelLabel`/`modelSpec` fallbacks.
 - **`selectLiveSession` (451)** and **`pollInstances` (1781)** — keep their `applyActiveSessionMetadata(...)` calls (sync paths). No change.
 - **`handleMirrorSync` (1717–1733)** — replace merge ternary with `currentModelId = data.model || ''`; keep `contextWindowSize = data.model?.contextWindow`; `currentThinkingLevel = data.thinkingLevel || 'off'`.
 - **`fetchModelInfo` (1441–1472)** — `currentModelId = stateData.data.model || ''`; `currentThinkingLevel = stateData.data.thinkingLevel || 'off'`. **Remove the dead `availableModels.find(...)` block.** For context-window, read `stateData.data.model?.contextWindow` directly (tau's `session.model` may carry it after `set_model`); otherwise rely on `handleMirrorSync`/`applyModelInput`.
+- **`parseModelSpec(raw)`** — **FIXED**: The old regex `([^\/:]+)` rejected `/` in model IDs, making it impossible to input models like `openrouter/z-ai/glm-5.2:high`. Replaced with explicit string slicing: splits on the first `/` for provider, then checks the last `:` for a valid thinking level suffix. Model IDs with embedded slashes (e.g. OpenRouter `z-ai/glm-5.2`) are now accepted.
+- **`modelDisplayString()`** — Added explanatory comment about first-slash-split semantics for the legacy string fallback path. The object branch (primary path) was already correct — it emits `${provider}/${modelId}:${level}` directly, which preserves multi-slash model IDs in the display.
 - **`applyModelInput` (1388–1404)** and **settings `btnThinkingLevel` click (2148–2153)** — keep (user-input authoritative). Now backed by correct echoes + extension-refresh, so optimistic set and `live_session_updated` echo write the same value — no race, no revert.
 - **`openSettings` (2108)** — keep (initial-load via `get_state`).
-- **`modelDisplayString()` (1284)** — keep object branch as primary; string branch stays as defensive fallback only.
 
 ### 3. Tests `test/pi-rpc-session.test.js`
 
@@ -100,7 +101,8 @@ Because the server is canonical, the client's object-vs-string merge ternaries a
 - Add: `updateStateFromResponse` for `set_model`/`cycle_model` stores full `{provider,id}` and never a bare string; `parseModelSpecToModel` parses `provider/id:level`; `normalizeModel` parses a `provider/id` string into an object.
 - Add: `set_thinking_level` echo fix — after a successful `set_thinking_level` (mock pi `{success:true}` no data), `session.thinkingLevel` equals the command's level (not stale).
 - Add: extension-refresh — after a `prompt`/`steer`/`follow_up` ack (mock pi `get_state` returning a new model), `session.model`/`session.thinkingLevel` are refreshed from `get_state` and `broadcastUpdated` is emitted with the new values. (Requires `handleRpcCommand` to be testable; it's already exported at line 1145 with `liveManager` — wire mocks similarly to existing tests.)
-- No client JS test harness exists; client behavior verified manually per the checklist.
+- **Added**: multi-slash model name tests — `normalizeModel('openrouter/z-ai/glm-5.2')` correctly produces `{provider: 'openrouter', id: 'z-ai/glm-5.2'}` (splits on first `/` only); `parseModelSpecToModel('openrouter/z-ai/glm-5.2:high')` correctly separates provider (`openrouter`), model id (`z-ai/glm-5.2`), and level (`high`).
+- No client JS test harness exists; client `parseModelSpec` behavior verified manually per the checklist.
 
 ### 4. Rewrite `AGENTS.md` "Preserve full model identity in the UI" section
 
