@@ -41,10 +41,9 @@
       <div class="header">
         <div class="header-left">
           <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
-          <input class="model-input" id="model-input" type="text"
-                 placeholder="provider/model:thinking"
-                 title="Set model and (optionally) thinking level for this session"
-                 autocomplete="off" spellcheck="false">
+          <button class="model-input" id="model-input" type="button"
+                  title="Choose model and (optionally) thinking level for this session"
+                  aria-label="Choose model and thinking level">Model</button>
         </div>
         <div class="header-right">
           <div class="pill session-cost" id="session-cost" title="Session cost"></div>
@@ -209,6 +208,24 @@
   <div class="command-palette hidden" id="command-palette">
     <div class="command-palette-header">Commands</div>
     <div class="command-list" id="command-list"></div>
+  </div>
+
+  <!-- Model Picker -->
+  <div class="model-picker-overlay hidden" id="model-picker-overlay"></div>
+  <div class="model-picker hidden" id="model-picker" role="dialog" aria-modal="true" aria-labelledby="model-picker-title">
+    <div class="model-picker-header">
+      <h3 id="model-picker-title">Model</h3>
+      <button class="model-picker-close" id="model-picker-close" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="model-picker-body">
+      <input class="model-picker-input" id="model-picker-input" type="text" placeholder="provider/model:thinking" autocomplete="off" spellcheck="false">
+      <div class="model-picker-message" id="model-picker-message">Type provider or model name; optional :off|minimal|low|medium|high|xhigh</div>
+      <div class="model-list" id="model-picker-list" role="listbox" aria-label="Available models"></div>
+    </div>
+    <div class="model-picker-actions">
+      <button type="button" class="secondary-btn" id="model-picker-cancel">Cancel</button>
+      <button type="button" class="primary-btn" id="model-picker-save">Save</button>
+    </div>
   </div>
 
   <!-- New live session modal -->

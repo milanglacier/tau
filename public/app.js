@@ -1275,10 +1275,22 @@ async function showSessionStats() {
 // ═══════════════════════════════════════
 
 const modelInput = document.getElementById('model-input');
+const modelPickerOverlay = document.getElementById('model-picker-overlay');
+const modelPicker = document.getElementById('model-picker');
+const modelPickerInput = document.getElementById('model-picker-input');
+const modelPickerList = document.getElementById('model-picker-list');
+const modelPickerMessage = document.getElementById('model-picker-message');
+const modelPickerClose = document.getElementById('model-picker-close');
+const modelPickerCancel = document.getElementById('model-picker-cancel');
+const modelPickerSave = document.getElementById('model-picker-save');
 const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+const MODEL_PICKER_HELP = 'Type provider or model name; optional :off|minimal|low|medium|high|xhigh';
 let currentModelId = '';
 let availableModels = [];
 let currentThinkingLevel = 'off';
+let modelPickerMatches = [];
+let modelPickerActiveIndex = -1;
+let modelPickerJustSelected = false;
 
 function modelDisplayString() {
   if (!currentModelId) return '';
@@ -1308,9 +1320,9 @@ function modelDisplayString() {
 }
 
 function updateModelDisplay() {
-  if (modelInput.dataset.editing === '1') return;
-  const display = modelDisplayString();
-  modelInput.value = display;
+  const display = modelDisplayString() || 'Model';
+  modelInput.textContent = display;
+  modelInput.title = display === 'Model' ? 'Choose model and (optionally) thinking level for this session' : display;
   modelInput.classList.remove('invalid');
 }
 
@@ -1328,7 +1340,7 @@ function parseModelSpec(raw) {
   }
   const provider = trimmed.slice(0, firstSlash);
   const rest = trimmed.slice(firstSlash + 1);
-  if (!rest) {
+  if (!provider || !rest) {
     return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
   }
   let modelId = rest;
@@ -1358,7 +1370,7 @@ function flashStatusError(msg, ms = 3000) {
   // cannot overwrite this error message while the red dot persists.
   clearTimeout(statusRestoreTimer);
   // Cancel any prior flash restore so overlapping flashes (a second
-  // applyModelInput failure within 3s) cannot leak a stray restore that
+  // model-save failure within 3s) cannot leak a stray restore that
   // would reset the dot before this flash's own restore fires.
   clearTimeout(statusFlashTimer);
   statusText.textContent = msg;
@@ -1377,28 +1389,238 @@ function flashStatusError(msg, ms = 3000) {
   }, ms);
 }
 
-async function applyModelInput() {
-  // No-op when the user didn't actually edit anything (e.g. focus then blur,
-  // or the value was just reverted). Avoids spurious set_model/set_thinking_level
-  // RPCs and false validation errors on the current display string.
-  if (modelInput.value.trim() === modelDisplayString()) {
-    modelInput.classList.remove('invalid');
+function normalizeAvailableModel(model) {
+  if (!model) return null;
+  if (typeof model === 'string') {
+    const slashIdx = model.indexOf('/');
+    if (slashIdx === -1) return null;
+    return { provider: model.slice(0, slashIdx), id: model.slice(slashIdx + 1), label: model };
+  }
+  const provider = model.provider || '';
+  const id = model.id || model.model || model.name || '';
+  if (!provider || !id) return null;
+  return {
+    provider,
+    id,
+    label: `${provider}/${id}`,
+    contextWindow: model.contextWindow || model.context || model.context_window || '',
+    maxOutput: model.maxOutput || model.max_output || model.maxOut || '',
+    thinking: model.thinking,
+    images: model.images,
+  };
+}
+
+function normalizedAvailableModels() {
+  const seen = new Set();
+  const out = [];
+  for (const item of availableModels || []) {
+    const normalized = normalizeAvailableModel(item);
+    if (!normalized) continue;
+    const key = `${normalized.provider}/${normalized.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function modelRef(model) {
+  return `${model.provider}/${model.id}`;
+}
+
+function fuzzyCharsEquivalent(a, b) {
+  if (a === b) return true;
+  const groups = ['o0', 'i1l', 's5', 'b8', 'g9', 'z2'];
+  return groups.some((group) => group.includes(a) && group.includes(b));
+}
+
+function fuzzyMatch(query, text) {
+  const q = String(query || '').toLowerCase();
+  const t = String(text || '').toLowerCase();
+  if (!q) return { score: 0 };
+  if (!t) return null;
+  const compactQ = q.replace(/[\W_]+/g, '');
+  const compactT = t.replace(/[\W_]+/g, '');
+  if (compactQ && compactT.includes(compactQ)) {
+    return { score: 1200 - compactT.indexOf(compactQ) };
+  }
+
+  let qi = 0;
+  let lastMatch = -1;
+  let score = 0;
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    const qc = q[qi];
+    const tc = t[ti];
+    const direct = qc === tc;
+    const swap = fuzzyCharsEquivalent(qc, tc);
+    if (!direct && !swap) continue;
+    score += direct ? 20 : 8;
+    if (ti === 0 || /[\s/_:.-]/.test(t[ti - 1])) score += 12;
+    if (lastMatch === ti - 1) score += 18;
+    if (lastMatch !== -1) score -= Math.max(0, ti - lastMatch - 1);
+    lastMatch = ti;
+    qi++;
+  }
+  if (qi !== q.length) return null;
+  if (t === q) score += 500;
+  if (t.startsWith(q)) score += 250;
+  return { score };
+}
+
+function fuzzyFilter(items, query, getText) {
+  const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return items.map((item, index) => ({ item, score: -index }));
+  const scored = [];
+  items.forEach((item, index) => {
+    const text = getText(item);
+    let total = 0;
+    for (const token of tokens) {
+      const match = fuzzyMatch(token, text);
+      if (!match) return;
+      total += match.score;
+    }
+    scored.push({ item, score: total - index * 0.01 });
+  });
+  return scored.sort((a, b) => b.score - a.score);
+}
+
+function validThinkingSuffix(raw) {
+  const text = String(raw || '').trim();
+  const colonIdx = text.lastIndexOf(':');
+  if (colonIdx === -1) return '';
+  const candidate = text.slice(colonIdx + 1).toLowerCase();
+  return VALID_THINKING_LEVELS.has(candidate) ? `:${candidate}` : '';
+}
+
+function setModelPickerMessage(message = MODEL_PICKER_HELP, isError = false) {
+  modelPickerMessage.textContent = message;
+  modelPickerMessage.classList.toggle('error', isError);
+  modelPickerInput.classList.toggle('invalid', isError);
+}
+
+function updateModelPickerActiveItem() {
+  modelPickerList.querySelectorAll('.model-item').forEach((item, index) => {
+    const active = index === modelPickerActiveIndex;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+}
+
+function renderModelPickerSuggestions() {
+  const raw = modelPickerInput.value || '';
+  modelPickerSave.disabled = !raw.trim();
+  modelPickerList.innerHTML = '';
+  modelPickerJustSelected = false;
+  if (raw.includes(':')) {
+    modelPickerMatches = [];
+    modelPickerActiveIndex = -1;
+    setModelPickerMessage(MODEL_PICKER_HELP, false);
     return;
   }
+
+  const models = normalizedAvailableModels();
+  const query = raw.trim();
+  modelPickerMatches = fuzzyFilter(models, query, (model) => `${model.id} ${model.provider}`).slice(0, 50).map((m) => m.item);
+  if (modelPickerActiveIndex >= modelPickerMatches.length) modelPickerActiveIndex = modelPickerMatches.length - 1;
+  if (modelPickerActiveIndex < 0 && modelPickerMatches.length) modelPickerActiveIndex = 0;
+
+  if (!modelPickerMatches.length) {
+    const empty = document.createElement('div');
+    empty.className = 'model-item-context';
+    empty.textContent = models.length ? 'No matching models. You can still save a manual provider/model value.' : 'No model list available. You can still save a manual provider/model value.';
+    empty.style.padding = '10px 12px';
+    modelPickerList.appendChild(empty);
+    return;
+  }
+
+  modelPickerMatches.forEach((model, index) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `model-item${index === modelPickerActiveIndex ? ' active' : ''}`;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', index === modelPickerActiveIndex ? 'true' : 'false');
+    const meta = [
+      model.contextWindow || model.context,
+      model.maxOutput ? `out ${model.maxOutput}` : '',
+      model.thinking === true ? 'thinking' : '',
+      model.images === true ? 'images' : '',
+    ].filter(Boolean).join(' · ');
+    item.innerHTML = `
+      <span class="model-item-name">${escapeHtml(model.id)}<span class="model-item-provider">${escapeHtml(model.provider)}</span></span>
+      <span class="model-item-context">${escapeHtml(meta)}</span>
+    `;
+    item.addEventListener('mouseenter', () => {
+      modelPickerActiveIndex = index;
+      updateModelPickerActiveItem();
+    });
+    item.addEventListener('click', () => selectModelSuggestion(index));
+    modelPickerList.appendChild(item);
+  });
+}
+
+function selectModelSuggestion(index) {
+  const model = modelPickerMatches[index];
+  if (!model) return;
+  const suffix = validThinkingSuffix(modelPickerInput.value);
+  modelPickerInput.value = `${modelRef(model)}${suffix}`;
+  modelPickerInput.focus();
+  modelPickerInput.setSelectionRange(modelPickerInput.value.length, modelPickerInput.value.length);
+  modelPickerMatches = [];
+  modelPickerActiveIndex = -1;
+  modelPickerList.innerHTML = '';
+  modelPickerSave.disabled = false;
+  modelPickerJustSelected = true;
+}
+
+function openModelPicker() {
   if (!viewingActiveSession || !activeLiveSessionId) {
     flashStatusError('Select a live Tau tab first.');
-    modelInput.value = modelDisplayString();
     return;
   }
-  const parsed = parseModelSpec(modelInput.value);
+  modelPickerInput.value = modelDisplayString();
+  modelPickerActiveIndex = -1;
+  modelPickerJustSelected = false;
+  setModelPickerMessage(MODEL_PICKER_HELP, false);
+  renderModelPickerSuggestions();
+  modelPicker.classList.remove('hidden');
+  modelPickerOverlay.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    modelPickerInput.focus();
+    modelPickerInput.select();
+  });
+  fetchModelInfo().then(() => {
+    if (!modelPicker.classList.contains('hidden')) renderModelPickerSuggestions();
+  }).catch(() => {});
+}
+
+function closeModelPicker() {
+  modelPicker.classList.add('hidden');
+  modelPickerOverlay.classList.add('hidden');
+  modelPickerMatches = [];
+  modelPickerActiveIndex = -1;
+  modelPickerJustSelected = false;
+  modelPickerList.innerHTML = '';
+  setModelPickerMessage(MODEL_PICKER_HELP, false);
+}
+
+async function applyModelSpec(rawSpec) {
+  const raw = String(rawSpec || '').trim();
+  // No-op when the user didn't actually edit anything. Avoids spurious
+  // set_model/set_thinking_level RPCs and false validation errors on the
+  // current display string.
+  if (raw === modelDisplayString()) {
+    modelInput.classList.remove('invalid');
+    return { success: true };
+  }
+  if (!viewingActiveSession || !activeLiveSessionId) {
+    const error = 'Select a live Tau tab first.';
+    flashStatusError(error);
+    return { success: false, error };
+  }
+  const parsed = parseModelSpec(raw);
   if (parsed.error) {
-    modelInput.classList.add('invalid');
     flashStatusError(parsed.error);
-    modelInput.value = modelDisplayString();
-    // Clear the red border once the status message clears so a valid reverted
-    // value is not left marked invalid indefinitely.
-    setTimeout(() => modelInput.classList.remove('invalid'), 3000);
-    return;
+    return { success: false, error: parsed.error };
   }
   const r = await rpcCommand({ type: 'set_model', provider: parsed.provider, modelId: parsed.modelId }, `Switching to ${parsed.provider}/${parsed.modelId}...`);
   if (r && r.success) {
@@ -1406,11 +1628,13 @@ async function applyModelInput() {
     // Always retain the provider so modelDisplayString() can render the
     // full `provider/model:thinking` form. The server sometimes omits
     // `provider` in its response; fall back to the user-typed value.
-    const provider = data.provider || parsed.provider;
-    const id = data.id || parsed.modelId;
-    currentModelId = (provider && id) ? { provider, id } : (id || parsed.modelId);
-    if (data.contextWindow) {
-      contextWindowSize = data.contextWindow;
+    const responseModel = data.model || data;
+    const provider = responseModel.provider || parsed.provider;
+    const id = responseModel.id || parsed.modelId;
+    currentModelId = (provider && id) ? { ...responseModel, provider, id } : (id || parsed.modelId);
+    const responseContextWindow = responseModel.contextWindow || data.contextWindow;
+    if (responseContextWindow) {
+      contextWindowSize = responseContextWindow;
       updateTokenUsage();
     }
     if (parsed.thinking !== null) {
@@ -1418,42 +1642,79 @@ async function applyModelInput() {
       if (t && t.success) {
         currentThinkingLevel = parsed.thinking;
       } else {
-        flashStatusError((t && t.error) ? t.error : 'Failed to set thinking level');
+        const error = (t && t.error) ? t.error : 'Failed to set thinking level';
+        flashStatusError(error);
+        updateModelDisplay();
+        return { success: false, error };
       }
     }
     modelInput.classList.remove('invalid');
     updateModelDisplay();
+    return { success: true };
+  }
+  const error = (r && r.error) ? r.error : 'Unknown model';
+  flashStatusError(error);
+  modelInput.classList.add('invalid');
+  setTimeout(() => modelInput.classList.remove('invalid'), 1200);
+  return { success: false, error };
+}
+
+async function saveModelPicker() {
+  const result = await applyModelSpec(modelPickerInput.value);
+  if (result.success) {
+    closeModelPicker();
   } else {
-    modelInput.classList.add('invalid');
-    flashStatusError((r && r.error) ? r.error : 'Unknown model');
-    modelInput.value = modelDisplayString();
-    setTimeout(() => modelInput.classList.remove('invalid'), 3000);
+    setModelPickerMessage(result.error || 'Failed to update model', true);
+    modelPickerInput.focus();
   }
 }
 
-// Set by the Escape handler so the subsequent blur does not re-commit the
-// (just-reverted) value over the network.
-let suppressBlurApply = false;
-modelInput.addEventListener('keydown', (e) => {
+modelInput.addEventListener('click', openModelPicker);
+modelPickerOverlay.addEventListener('click', closeModelPicker);
+modelPickerClose.addEventListener('click', closeModelPicker);
+modelPickerCancel.addEventListener('click', closeModelPicker);
+modelPickerSave.addEventListener('click', saveModelPicker);
+modelPickerInput.addEventListener('input', () => {
+  modelPickerJustSelected = false;
+  setModelPickerMessage(MODEL_PICKER_HELP, false);
+  renderModelPickerSuggestions();
+});
+modelPickerInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeModelPicker();
+    return;
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (modelPickerMatches.length) {
+      modelPickerActiveIndex = (modelPickerActiveIndex + 1) % modelPickerMatches.length;
+      renderModelPickerSuggestions();
+    }
+    return;
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (modelPickerMatches.length) {
+      modelPickerActiveIndex = (modelPickerActiveIndex - 1 + modelPickerMatches.length) % modelPickerMatches.length;
+      renderModelPickerSuggestions();
+    }
+    return;
+  }
+  if (e.key === 'Tab' && modelPickerMatches.length && modelPickerActiveIndex >= 0) {
+    e.preventDefault();
+    selectModelSuggestion(modelPickerActiveIndex);
+    return;
+  }
   if (e.key === 'Enter') {
     e.preventDefault();
-    modelInput.blur();
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    suppressBlurApply = true;
-    modelInput.value = modelDisplayString();
-    modelInput.classList.remove('invalid');
-    modelInput.blur();
+    if (!modelPickerJustSelected && modelPickerMatches.length && modelPickerActiveIndex >= 0) {
+      selectModelSuggestion(modelPickerActiveIndex);
+    } else {
+      saveModelPicker();
+    }
   }
-});
-modelInput.addEventListener('focus', () => {
-  modelInput.dataset.editing = '1';
-  modelInput.classList.remove('invalid');
-});
-modelInput.addEventListener('blur', () => {
-  delete modelInput.dataset.editing;
-  if (suppressBlurApply) { suppressBlurApply = false; return; }
-  applyModelInput();
 });
 
 async function fetchModelInfo() {
@@ -1494,6 +1755,10 @@ document.addEventListener('keydown', (e) => {
   // Escape — Abort streaming, or close sidebar on mobile
   if (e.key === 'Escape') {
     // Close palettes/panels first
+    if (!modelPicker.classList.contains('hidden')) {
+      closeModelPicker();
+      return;
+    }
     if (!settingsPanel.classList.contains('hidden')) {
       closeSettings();
       return;

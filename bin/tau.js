@@ -177,6 +177,69 @@ function parseModelSpecToModel(spec) {
   return { model: normalizeModel(core), level };
 }
 
+function parseYesNo(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'yes') return true;
+  if (normalized === 'no') return false;
+  return value;
+}
+
+function parsePiListModels(output) {
+  const lines = String(output || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const models = [];
+  for (const line of lines) {
+    if (/^provider\s+model\s+/i.test(line)) continue;
+    const parts = line.split(/\s{2,}/).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) continue;
+    const [provider, id, context, maxOutput, thinking, images] = parts;
+    if (!provider || !id) continue;
+    models.push({
+      provider,
+      id,
+      ...(context !== undefined ? { context } : {}),
+      ...(maxOutput !== undefined ? { maxOutput } : {}),
+      ...(thinking !== undefined ? { thinking: parseYesNo(thinking) } : {}),
+      ...(images !== undefined ? { images: parseYesNo(images) } : {}),
+    });
+  }
+  return models;
+}
+
+const MODEL_LIST_CACHE_MS = 5 * 60 * 1000;
+let modelListCache = { at: 0, models: [] };
+let _execFileForTest = null;
+
+function execFileAsync(file, args, opts) {
+  const runner = _execFileForTest || execFile;
+  return new Promise((resolve, reject) => {
+    runner(file, args, opts, (err, stdout, stderr) => {
+      if (err) {
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+async function getAvailableModels() {
+  const now = Date.now();
+  if (modelListCache.at && now - modelListCache.at < MODEL_LIST_CACHE_MS) {
+    return modelListCache.models;
+  }
+  try {
+    const { stdout } = await execFileAsync('pi', ['--list-models'], { timeout: 30000, encoding: 'utf8' });
+    const models = parsePiListModels(stdout);
+    modelListCache = { at: now, models };
+    return models;
+  } catch (err) {
+    console.warn('[Tau] Failed to list Pi models:', err && err.message ? err.message : err);
+    modelListCache = { at: now, models: modelListCache.models || [] };
+    return modelListCache.models;
+  }
+}
+
 function makeId() {
   return `tau_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
 }
@@ -612,7 +675,7 @@ async function handleRpcCommand(command) {
     }
     return success({ enabled: authEnabled });
   }
-  if (cmd === 'get_available_models') return success({ models: [] });
+  if (cmd === 'get_available_models') return success({ models: await getAvailableModels() });
   if (cmd === 'set_session_name') {
     const name = (command.name || '').trim();
     if (!name) return error('Name cannot be empty');
@@ -1217,6 +1280,8 @@ function _setAuthForTest(enabled) { authEnabled = !!enabled; }
 // can be exercised without launching a real Pi process.
 let _spawnPiForTest = null;
 function _setSpawnPiForTest(fn) { _spawnPiForTest = fn || null; }
+function _setExecFileForTest(fn) { _execFileForTest = fn || null; modelListCache = { at: 0, models: [] }; }
+function _clearModelListCacheForTest() { modelListCache = { at: 0, models: [] }; }
 
 module.exports = {
   parseArgs,
@@ -1225,6 +1290,8 @@ module.exports = {
   modelLabel,
   normalizeModel,
   parseModelSpecToModel,
+  parsePiListModels,
+  getAvailableModels,
   makeId,
   PiRpcSession,
   LiveSessionManager,
@@ -1251,4 +1318,6 @@ module.exports = {
   PI_AGENT_DIR,
   _setAuthForTest,
   _setSpawnPiForTest,
+  _setExecFileForTest,
+  _clearModelListCacheForTest,
 };

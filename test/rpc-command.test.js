@@ -16,7 +16,9 @@ const {
   handleRpcCommand,
   liveManager,
   appendSessionName,
+  parsePiListModels,
   _setAuthForTest,
+  _setExecFileForTest,
   SESSIONS_DIR,
 } = require('../bin/tau.js');
 
@@ -34,6 +36,7 @@ after(() => {
 beforeEach(() => {
   liveManager.sessions.clear();
   _setAuthForTest(true);
+  _setExecFileForTest(null);
 });
 
 function injectSession(overrides = {}) {
@@ -90,10 +93,30 @@ test('set_auth toggles the enabled flag when credentials are configured', async 
   assert.equal(resp2.data.enabled, true);
 });
 
-test('get_available_models response shape is { models: [] }', async () => {
+test('parsePiListModels preserves slashful model ids from pi table output', () => {
+  const out = parsePiListModels(`provider      model                                               context  max-out  thinking  images
+anthropic     claude-opus-4-5                                     200K     64K      yes       yes
+fireworks     accounts/fireworks/models/deepseek-v4-flash         1M       384K     yes       no
+`);
+  assert.deepEqual(out, [
+    { provider: 'anthropic', id: 'claude-opus-4-5', context: '200K', maxOutput: '64K', thinking: true, images: true },
+    { provider: 'fireworks', id: 'accounts/fireworks/models/deepseek-v4-flash', context: '1M', maxOutput: '384K', thinking: true, images: false },
+  ]);
+});
+
+test('get_available_models returns parsed pi model list', async () => {
+  _setExecFileForTest((file, args, opts, cb) => {
+    assert.equal(file, 'pi');
+    assert.deepEqual(args, ['--list-models']);
+    cb(null, `provider      model                                               context  max-out  thinking  images
+openrouter    z-ai/glm-5.2                                        128K     16K      yes       no
+`, '');
+  });
   const resp = await handleRpcCommand({ type: 'get_available_models' });
   assert.equal(resp.success, true);
-  assert.deepEqual(resp.data.models, []);
+  assert.deepEqual(resp.data.models, [
+    { provider: 'openrouter', id: 'z-ai/glm-5.2', context: '128K', maxOutput: '16K', thinking: true, images: false },
+  ]);
 });
 
 test('set_session_name with filePath appends a session_info record', async () => {
