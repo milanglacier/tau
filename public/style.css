@@ -3356,13 +3356,12 @@ body.hide-thinking .thinking-block { display: none !important; }
   align-items: center;
   gap: 6px;
   min-height: 38px;
-  margin-top: 44px;
+  margin-top: 48px;
   padding: 0 12px;
   border-bottom: 1px solid var(--border-color, rgba(0,0,0,0.08));
   background: rgba(255,255,255,0.22);
   position: relative;
   z-index: 9;
-  overflow: hidden;
 }
 .live-tabs-list {
   display: flex;
@@ -3514,6 +3513,6 @@ body.hide-thinking .thinking-block { display: none !important; }
 .secondary-btn { background: rgba(255,255,255,.55); color: inherit; }
 .input-area.mirror-readonly { opacity: .62; }
 @media (max-width: 768px) {
-  .live-tabs { margin-top: 40px; padding: 0 8px; min-height: 34px; }
+  .live-tabs { margin-top: 58px; padding: 0 8px; min-height: 34px; }
   .live-tab { min-width: 100px; max-width: 170px; padding: 6px 7px; }
 }
