@@ -5,12 +5,109 @@
 import { WebSocketClient } from './websocket-client.js';
 import { StateManager } from './state.js';
 import { MessageRenderer } from './message-renderer.js';
-import { ToolCardRenderer } from './tool-card.js';
+import { ToolCardRenderer, type ToolExecution } from './tool-card.js';
 import { DialogHandler } from './dialogs.js';
-import { SessionSidebar } from './session-sidebar.js';
+import { SessionSidebar, type SidebarProject, type SidebarSession } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
 import { FileBrowser, getFileIcon } from './file-browser.js';
 import { Launcher } from './launcher.js';
+
+type ModelRecord = {
+  provider?: string;
+  id?: string;
+  name?: string;
+  model?: string;
+  label?: string;
+  context?: string | number;
+  contextWindow?: string | number;
+  context_window?: string | number;
+  maxOutput?: string | number;
+  max_output?: string | number;
+  maxOut?: string | number;
+  thinking?: boolean | string;
+  images?: boolean | string;
+  [key: string]: unknown;
+};
+
+type LiveSession = {
+  id: string;
+  cwd?: string;
+  sessionFile?: string | null;
+  sessionName?: string | null;
+  modelSpec?: string;
+  modelLabel?: string;
+  model?: ModelRecord | string | null;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  createdAt?: string;
+  lastActiveAt?: string;
+  contextUsage?: UsageRecord;
+};
+
+type LiveInstance = {
+  sessionFile?: string | null;
+  cwd?: string;
+  port: string;
+};
+
+type UsageRecord = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cost?: { total?: number };
+  [key: string]: unknown;
+};
+
+type MessageContentBlock = {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  source?: { data?: string; media_type?: string };
+  data?: string;
+  media_type?: string;
+  id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
+};
+
+type AppMessage = {
+  id?: string;
+  role?: string;
+  content?: string | MessageContentBlock[];
+  usage?: UsageRecord;
+  images?: PendingImage[];
+  toolCallId?: string;
+  isError?: boolean;
+};
+
+type AppEvent = {
+  type?: string;
+  sessionId?: string;
+  session?: LiveSession;
+  message?: AppMessage | string;
+  assistantMessageEvent?: { type?: string; delta?: string };
+  toolCallId?: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  partialResult?: unknown;
+  result?: unknown;
+  isError?: boolean;
+  method?: string;
+  id?: string;
+  name?: string;
+  error?: string;
+  summary?: string;
+  contextUsage?: UsageRecord;
+  sessionFile?: string;
+  [key: string]: unknown;
+};
+
+type PendingImage = { data: string; mimeType: string };
+type PendingFilePath = { path: string; name: string; ext: string; sessionId?: string | null };
+type QueuedCommand = { type: string; message?: string; images?: PendingImage[]; sessionId?: string };
+type ExtensionUIRequest = { sessionId: string; event: AppEvent };
+type RpcCommand = { type: string; sessionId?: string; filePath?: string; [key: string]: unknown };
 
 
 // Initialize components
@@ -38,13 +135,13 @@ const statusText = document.getElementById('status-text');
 // status message (rpcCommand success/error). Any new status message must
 // clear this so a stale restore cannot overwrite a later, longer-lived
 // message (e.g. the red-dot error flash).
-let statusRestoreTimer = null;
+let statusRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 // Tracks the pending timer that restores the status indicator (dot) and
 // text after a red-dot error flash. Kept SEPARATE from statusRestoreTimer
 // so a normal setStatusMessage call cannot cancel the only callback that
 // would clear the `error` class — otherwise an unrelated status update
 // during the 3s flash would strand the dot red with no timer to reset it.
-let statusFlashTimer = null;
+let statusFlashTimer: ReturnType<typeof setTimeout> | null = null;
 // Restore the status indicator dot to its real connection/streaming state.
 // Only touches the indicator class (not statusText), so callers can set the
 // accompanying text themselves.
@@ -59,7 +156,7 @@ function restoreStatusIndicator() {
 // status message also supersedes any active error flash: it cancels the
 // flash's restore and returns the dot to its real state so the `error`
 // class cannot linger with no timer to clear it.
-function setStatusMessage(text, restoreText = null, restoreMs = 3000) {
+function setStatusMessage(text: string, restoreText: string | null = null, restoreMs = 3000) {
   if (statusFlashTimer !== null) {
     clearTimeout(statusFlashTimer);
     statusFlashTimer = null;
@@ -89,7 +186,7 @@ const scrollBottomBadge = document.getElementById('scroll-bottom-badge');
 const messagesContainer = document.getElementById('messages');
 
 // State tracking
-let currentStreamingElement = null;
+let currentStreamingElement: HTMLElement | null = null;
 let currentStreamingText = '';
 let sessionTotalCost = 0;
 let lastInputTokens = 0;
@@ -99,16 +196,16 @@ let hasFocus = true;
 let unreadCount = 0;
 let isScrolledUp = false;
 let hasNewWhileScrolled = false;
-let lastSentMessage = null; // Track to avoid duplicate rendering in mirror mode
-let lastUsage = null; // Full usage object for context visualiser
-let mirrorActiveSessionFile = null; // The active live session file path
+let lastSentMessage: string | null = null; // Track to avoid duplicate rendering in mirror mode
+let lastUsage: UsageRecord | null = null; // Full usage object for context visualiser
+let mirrorActiveSessionFile: string | null = null; // The active live session file path
 let viewingActiveSession = false; // Whether we're viewing a live backend Tau tab or historical read-only session
 let isMirrorMode = false; // Legacy name: true when standalone live-session mode is connected
-let liveInstances = []; // Legacy sidebar live indicators; now derived from backend live sessions
-let liveSessions = [];
+let liveInstances: LiveInstance[] = []; // Legacy sidebar live indicators; now derived from backend live sessions
+let liveSessions: LiveSession[] = [];
 let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
 let hasRestoredInitialLiveSession = false;
-let pendingExtensionUIRequests = []; // background session UI requests waiting for that Tau tab to be selected
+let pendingExtensionUIRequests: ExtensionUIRequest[] = []; // background session UI requests waiting for that Tau tab to be selected
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
 // File browser
@@ -217,6 +314,10 @@ scrollBottomBtn.addEventListener('click', () => {
   scrollBottomBadge.classList.add('hidden');
   hasNewWhileScrolled = false;
 });
+
+function scrollToBottom() {
+  messagesContainer.scrollTo({ top: messagesContainer.scrollHeight, behavior: 'smooth' });
+}
 
 function showNewMessageBadge() {
   if (isScrolledUp) {
@@ -384,7 +485,9 @@ function upsertLiveSession(session) {
 }
 
 function getMostRecentLiveSession() {
-  return [...liveSessions].sort((a, b) => new Date(b.lastActiveAt || b.createdAt || 0) - new Date(a.lastActiveAt || a.createdAt || 0))[0] || null;
+  return [...liveSessions].sort((a, b) =>
+    new Date(b.lastActiveAt || b.createdAt || 0).getTime() - new Date(a.lastActiveAt || a.createdAt || 0).getTime()
+  )[0] || null;
 }
 
 function basename(p) {
@@ -912,8 +1015,8 @@ const attachBtn = document.getElementById('attach-btn');
 const imageInput = document.getElementById('image-input');
 const imagePreviews = document.getElementById('image-previews');
 
-let pendingImages = [];     // { data: base64, mimeType }
-let pendingFilePaths = [];  // { path, name, ext } — from file browser (populated by callback above)
+let pendingImages: PendingImage[] = [];     // { data: base64, mimeType }
+let pendingFilePaths: PendingFilePath[] = [];  // { path, name, ext } — from file browser (populated by callback above)
 
 const MAX_IMAGE_DIM = 2048;
 const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
@@ -923,7 +1026,7 @@ function getFileChipIcon(name) {
   return getFileIcon(name || 'file', false);
 }
 
-function processImageFile(file) {
+function processImageFile(file: File): Promise<PendingImage> {
   return new Promise((resolve, reject) => {
     const mimeType = VALID_MIME_TYPES.includes(file.type) ? file.type : 'image/png';
 
@@ -952,7 +1055,7 @@ function processImageFile(file) {
         resolve({ data: base64, mimeType: outputMime });
       };
       img.onerror = () => reject(new Error('Failed to decode image'));
-      img.src = reader.result;
+      img.src = String(reader.result || '');
     };
     reader.readAsDataURL(file);
   });
@@ -1076,7 +1179,7 @@ function renderAttachmentPreviews() {
 // Send message (with images)
 // ═══════════════════════════════════════
 
-let messageQueue = [];
+let messageQueue: QueuedCommand[] = [];
 
 function sendMessage() {
   const message = messageInput.value.trim();
@@ -1085,7 +1188,7 @@ function sendMessage() {
   messageInput.value = '';
   messageInput.style.height = 'auto';
 
-  const cmd = { type: 'prompt', message: message || '(see attached image)' };
+  const cmd: QueuedCommand = { type: 'prompt', message: message || '(see attached image)' };
 
   if (pendingImages.length > 0) {
     cmd.images = pendingImages.map(img => {
@@ -1219,7 +1322,7 @@ function closeCommandPalette() {
 commandBtn.addEventListener('click', openCommandPalette);
 commandPaletteOverlay.addEventListener('click', closeCommandPalette);
 
-async function rpcCommand(cmd, statusMsg) {
+async function rpcCommand(cmd: RpcCommand, statusMsg = '') {
   try {
     const backendLocalCommands = new Set(['get_auth', 'set_auth', 'get_available_models']);
     const needsLiveSession = !cmd.sessionId && !cmd.filePath && !backendLocalCommands.has(cmd.type);
@@ -1285,10 +1388,10 @@ const modelPickerCancel = document.getElementById('model-picker-cancel');
 const modelPickerSave = document.getElementById('model-picker-save');
 const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const MODEL_PICKER_HELP = 'Type provider or model name; optional :off|minimal|low|medium|high|xhigh';
-let currentModelId = '';
-let availableModels = [];
+let currentModelId: ModelRecord | string = '';
+let availableModels: Array<ModelRecord | string> = [];
 let currentThinkingLevel = 'off';
-let modelPickerMatches = [];
+let modelPickerMatches: ModelRecord[] = [];
 let modelPickerActiveIndex = -1;
 let modelPickerJustSelected = false;
 
@@ -2437,7 +2540,7 @@ toggleShowThinking.addEventListener('click', () => {
   const isOn = toggleShowThinking.classList.contains('on');
   toggleShowThinking.className = `settings-toggle${isOn ? '' : ' on'}`;
   document.body.classList.toggle('hide-thinking', isOn);
-  localStorage.setItem('tau-show-thinking', !isOn);
+  localStorage.setItem('tau-show-thinking', String(!isOn));
 });
 
 // Auth toggle
@@ -2546,7 +2649,7 @@ tokenUsageEl.addEventListener('click', (e) => {
 
 // Close on click outside
 document.addEventListener('click', (e) => {
-  if (!contextViz.contains(e.target) && e.target !== tokenUsageEl) {
+  if (!contextViz.contains(e.target as Node) && e.target !== tokenUsageEl) {
     contextViz.classList.add('hidden');
   }
 });

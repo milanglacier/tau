@@ -18,11 +18,34 @@
   "bin": {
     "tau": "./bin/tau.js"
   },
+  "files": [
+    "bin",
+    "public",
+    "extensions",
+    "src",
+    "tsconfig.json",
+    "tsconfig.server.json",
+    "tsconfig.public.json",
+    "tsconfig.extensions.json"
+  ],
   "scripts": {
-    "test": "node --test"
+    "build": "tsc -p tsconfig.server.json && tsc -p tsconfig.public.json && tsc -p tsconfig.extensions.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.public.json --noEmit && tsc -p tsconfig.extensions.json --noEmit",
+    "test": "npm run build && node --test"
   },
   "dependencies": {
-    "ws": "^8.16.0",
-    "qrcode": "^1.5.0"
+    "qrcode": "^1.5.0",
+    "ws": "^8.16.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.9",
+    "@types/node": "^26.0.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
   }
 }

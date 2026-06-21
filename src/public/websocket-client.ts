@@ -3,7 +3,17 @@
  */
 
 export class WebSocketClient extends EventTarget {
-  constructor(url) {
+  url: string;
+  ws: WebSocket | null;
+  reconnectAttempts: number;
+  maxReconnectAttempts: number;
+  reconnectDelay: number;
+  maxReconnectDelay: number;
+  isIntentionallyClosed: boolean;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  connectionState: 'idle' | 'connecting' | 'open' | 'closed';
+
+  constructor(url: string) {
     super();
     this.url = url;
     this.ws = null;
@@ -110,7 +120,7 @@ export class WebSocketClient extends EventTarget {
     }, delay);
   }
 
-  send(data) {
+  send(data: unknown) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     } else {
@@ -118,7 +128,7 @@ export class WebSocketClient extends EventTarget {
     }
   }
 
-  handleMessage(message) {
+  handleMessage(message: { type?: string; [key: string]: unknown }) {
     // Emit events based on message type
     switch (message.type) {
       case 'event':

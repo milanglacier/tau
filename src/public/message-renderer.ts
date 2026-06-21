@@ -4,8 +4,32 @@
 
 import { renderMarkdown, renderUserMarkdown } from './markdown.js';
 
+type RenderedImage = {
+  data: string;
+  mimeType?: string;
+};
+
+type MessageContentBlock = {
+  type?: string;
+  text?: string;
+  thinking?: string;
+};
+
+type RenderMessage = {
+  id?: string;
+  content?: string | MessageContentBlock[];
+  images?: RenderedImage[];
+  usage?: {
+    cost?: { total?: number };
+    [key: string]: unknown;
+  };
+};
+
 export class MessageRenderer {
-  constructor(container) {
+  container: HTMLElement;
+  isNearBottom: boolean;
+
+  constructor(container: HTMLElement) {
     this.container = container;
     this.isNearBottom = true;
 
@@ -35,7 +59,7 @@ export class MessageRenderer {
     `;
   }
 
-  renderUserMessage(message, isHistory = false) {
+  renderUserMessage(message: RenderMessage, isHistory = false) {
     // Remove welcome message if present
     const welcome = this.container.querySelector('.welcome');
     if (welcome) welcome.remove();
@@ -62,7 +86,7 @@ export class MessageRenderer {
     if (!isHistory) this.scrollToBottom();
   }
 
-  renderAssistantMessage(message, isStreaming = false, isHistory = false) {
+  renderAssistantMessage(message: RenderMessage, isStreaming = false, isHistory = false) {
     // Remove welcome message if present
     const welcome = this.container.querySelector('.welcome');
     if (welcome) welcome.remove();
@@ -109,7 +133,7 @@ export class MessageRenderer {
     return div;
   }
 
-  renderThinkingBlock(thinking) {
+  renderThinkingBlock(thinking?: string) {
     const id = 'thinking-' + Math.random().toString(36).slice(2, 8);
     return `<div class="thinking-block">
 <div class="thinking-toggle" onclick="var c=document.getElementById('${id}');c.classList.toggle('expanded');this.classList.toggle('expanded')">
@@ -120,7 +144,7 @@ export class MessageRenderer {
 </div>`;
   }
 
-  updateStreamingThinking(messageElement, thinking) {
+  updateStreamingThinking(messageElement: HTMLElement, thinking: string) {
     let thinkingDiv = messageElement.querySelector('.streaming-thinking');
     if (!thinkingDiv) {
       const contentDiv = messageElement.querySelector('.message-content');
@@ -142,7 +166,7 @@ export class MessageRenderer {
     }
   }
 
-  updateStreamingMessage(messageElement, content) {
+  updateStreamingMessage(messageElement: HTMLElement, content: string) {
     const contentDiv = messageElement.querySelector('.message-content');
     if (!contentDiv) return;
 
@@ -179,7 +203,7 @@ export class MessageRenderer {
     this.scrollToBottom();
   }
 
-  finalizeStreamingMessage(messageElement, usage = null, thinking = '') {
+  finalizeStreamingMessage(messageElement: HTMLElement, usage: RenderMessage['usage'] | null = null, thinking = '') {
     const contentDiv = messageElement.querySelector('.message-content');
     if (contentDiv) {
       contentDiv.classList.remove('streaming');
@@ -224,15 +248,15 @@ export class MessageRenderer {
     }
   }
 
-  renderSystemMessage(text) {
+  renderSystemMessage(text: string) {
     const div = document.createElement('div');
     div.className = 'system-message';
-    div.textContent = text;
+    div.textContent = String(text ?? '');
     this.container.appendChild(div);
     this.scrollToBottom();
   }
 
-  renderError(errorMessage) {
+  renderError(errorMessage: string) {
     const div = document.createElement('div');
     div.className = 'error-message';
     div.textContent = `⚠️ ${errorMessage}`;
@@ -240,7 +264,7 @@ export class MessageRenderer {
     this.scrollToBottom();
   }
 
-  _setupCopyBtn(messageEl) {
+  _setupCopyBtn(messageEl: HTMLElement) {
     const btn = messageEl.querySelector('.message-copy-btn');
     if (!btn) return;
     btn.addEventListener('click', () => {
@@ -248,7 +272,7 @@ export class MessageRenderer {
       if (!content) return;
       const text = content.textContent;
       // Fallback for non-HTTPS (LAN access)
-      const copyText = (t) => {
+      const copyText = (t: string) => {
         if (navigator.clipboard) return navigator.clipboard.writeText(t);
         const ta = document.createElement('textarea');
         ta.value = t;
@@ -268,9 +292,9 @@ export class MessageRenderer {
     });
   }
 
-  escapeHtml(text) {
+  escapeHtml(text: unknown) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = String(text ?? '');
     return div.innerHTML;
   }
 

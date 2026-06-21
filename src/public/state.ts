@@ -3,6 +3,12 @@
  */
 
 export class StateManager {
+  messages: Record<string, unknown>[];
+  toolExecutions: Map<string, Record<string, unknown>>;
+  isStreaming: boolean;
+  currentStreamingMessage: Record<string, unknown> | null;
+  listeners: Set<() => void>;
+
   constructor() {
     this.messages = [];
     this.toolExecutions = new Map(); // toolCallId -> tool execution data
@@ -11,11 +17,11 @@ export class StateManager {
     this.listeners = new Set();
   }
 
-  addListener(callback) {
+  addListener(callback: () => void) {
     this.listeners.add(callback);
   }
 
-  removeListener(callback) {
+  removeListener(callback: () => void) {
     this.listeners.delete(callback);
   }
 
@@ -23,12 +29,12 @@ export class StateManager {
     this.listeners.forEach(callback => callback());
   }
 
-  addMessage(message) {
+  addMessage(message: Record<string, unknown>) {
     this.messages.push(message);
     this.notifyListeners();
   }
 
-  updateLastMessage(updates) {
+  updateLastMessage(updates: Record<string, unknown>) {
     if (this.messages.length > 0) {
       const lastMessage = this.messages[this.messages.length - 1];
       Object.assign(lastMessage, updates);
@@ -36,7 +42,7 @@ export class StateManager {
     }
   }
 
-  setStreamingMessage(message) {
+  setStreamingMessage(message: Record<string, unknown>) {
     this.currentStreamingMessage = message;
     this.notifyListeners();
   }
@@ -46,12 +52,12 @@ export class StateManager {
     this.notifyListeners();
   }
 
-  setStreaming(isStreaming) {
+  setStreaming(isStreaming: boolean) {
     this.isStreaming = isStreaming;
     this.notifyListeners();
   }
 
-  addToolExecution(toolCallId, data) {
+  addToolExecution(toolCallId: string, data: Record<string, unknown>) {
     this.toolExecutions.set(toolCallId, {
       toolCallId,
       toolName: data.toolName,
@@ -64,7 +70,7 @@ export class StateManager {
     this.notifyListeners();
   }
 
-  updateToolExecution(toolCallId, updates) {
+  updateToolExecution(toolCallId: string, updates: Record<string, unknown>) {
     const tool = this.toolExecutions.get(toolCallId);
     if (tool) {
       Object.assign(tool, updates);
@@ -72,7 +78,7 @@ export class StateManager {
     }
   }
 
-  getToolExecution(toolCallId) {
+  getToolExecution(toolCallId: string) {
     return this.toolExecutions.get(toolCallId);
   }
 

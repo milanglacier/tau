@@ -16,8 +16,73 @@ const readline = require('node:readline');
 const { WebSocketServer, WebSocket } = require('ws');
 const QRCode = require('qrcode');
 
-function parseArgs(argv) {
-  const out = {};
+type JsonRecord = Record<string, unknown>;
+type TauArgs = Record<string, string | boolean | undefined> & {
+  open?: boolean;
+  port?: string;
+  host?: string;
+  'projects-dir'?: string;
+};
+type TauSettingsFile = {
+  tau?: {
+    port?: string | number;
+    host?: string;
+    user?: string;
+    pass?: string;
+    authEnabled?: boolean;
+    projectsDir?: string;
+    [key: string]: unknown;
+  };
+};
+type TauSettings = {
+  port: number;
+  host: string;
+  user: string;
+  pass: string;
+  authEnabled?: boolean;
+  projectsDir: string;
+};
+type ModelIdentity = {
+  provider?: string;
+  id?: string;
+  name?: string;
+  [key: string]: unknown;
+};
+type ParsedModelSpec = { model: ModelIdentity | null; level: string | null };
+type RpcCommand = {
+  id?: string;
+  type?: string;
+  sessionId?: string;
+  filePath?: string;
+  outputPath?: string;
+  cwd?: string;
+  model?: string;
+  provider?: string;
+  modelId?: string;
+  level?: string;
+  name?: string;
+  enabled?: boolean;
+  [key: string]: unknown;
+};
+type RpcResponse = JsonRecord;
+type PendingCommand = {
+  resolve: (value: RpcResponse) => void;
+  reject: (reason: unknown) => void;
+  timer: ReturnType<typeof setTimeout>;
+  command?: string;
+};
+type LiveClient = {
+  readyState: number;
+  send(payload: string): void;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+  ping(): void;
+  isAlive?: boolean;
+};
+type StatusError = Error & { status?: number; stderr?: string };
+
+function parseArgs(argv: string[]): TauArgs {
+  const out: TauArgs = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (!arg.startsWith('--')) continue;
@@ -34,19 +99,19 @@ const USER_HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 const PI_AGENT_DIR = process.env.PI_CODING_AGENT_DIR || path.join(USER_HOME, '.pi', 'agent');
 const SESSIONS_DIR = process.env.PI_CODING_AGENT_SESSION_DIR || path.join(PI_AGENT_DIR, 'sessions');
 
-function expandHome(p) {
+function expandHome(p: string) {
   if (!p || typeof p !== 'string') return p;
   return p.startsWith('~') ? path.join(USER_HOME, p.slice(1)) : p;
 }
 
-function loadTauSettings() {
-  let settings = {};
+function loadTauSettings(): TauSettings {
+  let settings: TauSettingsFile['tau'] = {};
   try {
     const settingsPath = path.join(PI_AGENT_DIR, 'settings.json');
-    settings = (JSON.parse(fs.readFileSync(settingsPath, 'utf8')).tau || {});
+    settings = ((JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as TauSettingsFile).tau || {});
   } catch {}
   return {
-    port: parseInt(ARGS.port || process.env.TAU_MIRROR_PORT || process.env.TAU_PORT || settings.port || '3001', 10),
+    port: parseInt(String(ARGS.port || process.env.TAU_MIRROR_PORT || process.env.TAU_PORT || settings.port || '3001'), 10),
     host: ARGS.host || process.env.TAU_HOST || settings.host || '0.0.0.0',
     user: process.env.TAU_USER || settings.user || '',
     pass: process.env.TAU_PASS || settings.pass || '',
@@ -63,8 +128,8 @@ const HOST = TAU_SETTINGS.host;
 const STATIC_DIR = process.env.TAU_STATIC_DIR || findPublicDir();
 
 function findPublicDir() {
-  const candidates = [];
-  const add = (p) => candidates.push(path.resolve(p));
+  const candidates: string[] = [];
+  const add = (p: string) => candidates.push(path.resolve(p));
   add(path.join(__dirname, '..', 'public'));
   add(path.join(process.cwd(), 'public'));
   try {
@@ -83,11 +148,11 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2',
 };
 
-function saveTauSetting(key, value) {
+function saveTauSetting(key: string, value: unknown) {
   const settingsPath = path.join(PI_AGENT_DIR, 'settings.json');
   try {
-    let settings = {};
-    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')); } catch {}
+    let settings: TauSettingsFile = {};
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as TauSettingsFile; } catch {}
     if (!settings.tau) settings.tau = {};
     settings.tau[key] = value;
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -110,12 +175,12 @@ function sendAuthRequired(res) {
   res.end(JSON.stringify({ error: 'Unauthorized' }));
 }
 
-function json(res, status, data, extraHeaders = {}) {
+function json(res, status: number, data: unknown, extraHeaders: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
   res.end(JSON.stringify(data));
 }
 
-function readBody(req) {
+function readBody(req): Promise<RpcCommand> {
   return new Promise((resolve, reject) => {
     let body = '';
     req.on('data', (chunk) => {
@@ -123,13 +188,13 @@ function readBody(req) {
       if (body.length > 20 * 1024 * 1024) reject(new Error('Request body too large'));
     });
     req.on('end', () => {
-      try { resolve(body ? JSON.parse(body) : {}); } catch (e) { reject(e); }
+      try { resolve(body ? JSON.parse(body) as RpcCommand : {}); } catch (e) { reject(e); }
     });
     req.on('error', reject);
   });
 }
 
-function modelLabel(model, fallback = '') {
+function modelLabel(model: ModelIdentity | string | null | undefined, fallback = '') {
   if (!model) return fallback || '';
   if (typeof model === 'string') return model;
   if (model.provider && model.id) return `${model.provider}/${model.id}`;
@@ -139,11 +204,12 @@ function modelLabel(model, fallback = '') {
 // Normalize any model value into the canonical form: null or a full
 // {provider, id, ...} object. Bare `provider/id` strings (and "id" strings
 // with no slash) are parsed into objects; anything unrecognizable becomes null.
-function normalizeModel(value) {
+function normalizeModel(value: unknown): ModelIdentity | null {
   if (!value) return null;
   if (typeof value === 'object') {
-    if (value.provider && value.id) return { ...value };
-    if (value.id) return { ...value, provider: value.provider || '' };
+    const record = value as ModelIdentity;
+    if (record.provider && record.id) return { ...record };
+    if (record.id) return { ...record, provider: record.provider || '' };
     return null;
   }
   if (typeof value === 'string') {
@@ -162,7 +228,7 @@ function normalizeModel(value) {
 // Parse a `provider/id[:level]` spec string (as passed on session creation or
 // the model-input box) into a canonical {provider, id} object plus an optional
 // thinking level. Returns {model, level} where `model` is null when unparseable.
-function parseModelSpecToModel(spec) {
+function parseModelSpecToModel(spec: unknown): ParsedModelSpec {
   const trimmed = String(spec || '').trim();
   if (!trimmed) return { model: null, level: null };
   let level = null;
@@ -177,14 +243,14 @@ function parseModelSpecToModel(spec) {
   return { model: normalizeModel(core), level };
 }
 
-function parseYesNo(value) {
+function parseYesNo(value: unknown) {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'yes') return true;
   if (normalized === 'no') return false;
   return value;
 }
 
-function parsePiListModels(output) {
+function parsePiListModels(output: string) {
   const lines = String(output || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const models = [];
   for (const line of lines) {
@@ -206,15 +272,15 @@ function parsePiListModels(output) {
 }
 
 const MODEL_LIST_CACHE_MS = 5 * 60 * 1000;
-let modelListCache = { at: 0, models: [] };
-let _execFileForTest = null;
+let modelListCache: { at: number; models: ModelIdentity[] } = { at: 0, models: [] };
+let _execFileForTest: typeof execFile | null = null;
 
-function execFileAsync(file, args, opts) {
+function execFileAsync(file: string, args: string[], opts: JsonRecord): Promise<{ stdout: string; stderr: string }> {
   const runner = _execFileForTest || execFile;
   return new Promise((resolve, reject) => {
     runner(file, args, opts, (err, stdout, stderr) => {
       if (err) {
-        err.stderr = stderr;
+        (err as StatusError).stderr = stderr;
         reject(err);
         return;
       }
@@ -245,7 +311,29 @@ function makeId() {
 }
 
 class PiRpcSession {
-  constructor(manager, opts) {
+  manager: LiveSessionManager;
+  id: string;
+  cwd: string;
+  modelSpec: string;
+  child: ReturnType<typeof spawn> | null;
+  pid: number | null;
+  createdAt: string;
+  lastActiveAt: string;
+  isStreaming: boolean;
+  entries: JsonRecord[];
+  model: ModelIdentity | null;
+  thinkingLevel: string;
+  sessionFile: string | null;
+  sessionName: string | null;
+  contextUsage: JsonRecord | null;
+  pending: Map<string, PendingCommand>;
+  stdoutBuffer: string;
+  terminating: boolean;
+  exitCode: number | null;
+  titleSet: boolean;
+  userMessages: string[];
+
+  constructor(manager: LiveSessionManager, opts: { id?: string; cwd: string; modelSpec?: string }) {
     this.manager = manager;
     this.id = opts.id || makeId();
     this.cwd = opts.cwd;
@@ -324,7 +412,7 @@ class PiRpcSession {
     this.child.on('error', (err) => this.handleExit(null, null, err));
     this.child.on('exit', (code, signal) => this.handleExit(code, signal));
 
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
         this.child.off('error', onError);
@@ -359,7 +447,7 @@ class PiRpcSession {
     }, 250);
   }
 
-  send(command, opts = {}) {
+  send(command: RpcCommand, opts: { timeoutMs?: number } = {}) {
     if (!this.child || !this.child.stdin.writable || this.terminating) {
       return Promise.reject(new Error('Pi RPC session is not running'));
     }
@@ -367,7 +455,7 @@ class PiRpcSession {
     const outbound = { ...command, id };
     delete outbound.sessionId;
     const timeoutMs = opts.timeoutMs ?? 60000;
-    return new Promise((resolve, reject) => {
+    return new Promise<RpcResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`RPC command timed out: ${outbound.type}`));
@@ -514,7 +602,7 @@ class PiRpcSession {
     }
   }
 
-  handleExit(code, signal, err) {
+  handleExit(code: number | null, signal: string | null, err?: { message?: string }) {
     if (this.exitCode !== null) return;
     this.exitCode = code;
     for (const [, pending] of this.pending) {
@@ -522,30 +610,33 @@ class PiRpcSession {
       pending.reject(err || new Error(`Pi process exited (${signal || code})`));
     }
     this.pending.clear();
-    this.manager.removeExited(this.id, err ? err.message : `process_exit:${signal || code}`);
+    this.manager.removeExited(this.id, err?.message || `process_exit:${signal || code}`);
   }
 }
 
 class LiveSessionManager {
+  sessions: Map<string, PiRpcSession>;
+  clients: Set<LiveClient>;
+
   constructor() {
     this.sessions = new Map();
     this.clients = new Set();
   }
-  addClient(ws) { this.clients.add(ws); }
-  removeClient(ws) { this.clients.delete(ws); }
-  broadcast(data) {
+  addClient(ws: LiveClient) { this.clients.add(ws); }
+  removeClient(ws: LiveClient) { this.clients.delete(ws); }
+  broadcast(data: unknown) {
     const payload = JSON.stringify(data);
     for (const client of this.clients) {
       if (client.readyState === WebSocket.OPEN) client.send(payload);
     }
   }
-  broadcastUpdated(id) {
+  broadcastUpdated(id: string) {
     const s = this.sessions.get(id);
     if (s) this.broadcast({ type: 'live_session_updated', session: s.metadata() });
   }
   list() { return Array.from(this.sessions.values()).map((s) => s.metadata()); }
-  get(id) { return this.sessions.get(id); }
-  async create({ cwd, model }) {
+  get(id: string) { return this.sessions.get(id); }
+  async create({ cwd, model }: { cwd?: string; model?: string }) {
     const resolved = path.resolve(expandHome(cwd || process.cwd()));
     const session = new PiRpcSession(this, { cwd: resolved, modelSpec: (model || '').trim() });
     await session.start();
@@ -553,7 +644,7 @@ class LiveSessionManager {
     this.broadcast({ type: 'live_session_created', session: session.metadata() });
     return session;
   }
-  async delete(id, reason = 'closed_by_user') {
+  async delete(id: string, reason = 'closed_by_user') {
     const session = this.sessions.get(id);
     if (!session) return false;
     this.sessions.delete(id);
@@ -561,7 +652,7 @@ class LiveSessionManager {
     await session.terminate(reason);
     return true;
   }
-  removeExited(id, reason) {
+  removeExited(id: string, reason: string) {
     if (!this.sessions.has(id)) return;
     this.sessions.delete(id);
     this.broadcast({ type: 'live_session_closed', sessionId: id, reason });
@@ -577,7 +668,7 @@ const liveManager = new LiveSessionManager();
 let mirrorUrl = '';
 let tailscaleUrl = '';
 
-function resolveSessionFile(filePath) {
+function resolveSessionFile(filePath: string) {
   if (!filePath || typeof filePath !== 'string') throw new Error('filePath required');
   const resolved = path.resolve(filePath);
   const root = path.resolve(SESSIONS_DIR);
@@ -588,13 +679,13 @@ function resolveSessionFile(filePath) {
   return resolved;
 }
 
-function appendSessionName(filePath, name) {
+function appendSessionName(filePath: string, name: string) {
   const resolved = resolveSessionFile(filePath);
   fs.appendFileSync(resolved, JSON.stringify({ type: 'session_info', name, timestamp: new Date().toISOString() }) + '\n');
   return resolved;
 }
 
-function updateLiveSessionName(session, name) {
+function updateLiveSessionName(session: PiRpcSession | null | undefined, name: string) {
   if (!session) return;
   session.sessionName = name;
   session.titleSet = true;
@@ -602,14 +693,14 @@ function updateLiveSessionName(session, name) {
   liveManager.broadcastUpdated(session.id);
 }
 
-function isWithinPath(root, target) {
+function isWithinPath(root: string, target: string) {
   const rel = path.relative(path.resolve(root), path.resolve(target));
   return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
-function resolveLiveSessionPath(session, requestedPath) {
+function resolveLiveSessionPath(session: PiRpcSession | null | undefined, requestedPath?: string | null) {
   if (!session) {
-    const err = new Error('Live session not found');
+    const err = new Error('Live session not found') as StatusError;
     err.status = 404;
     throw err;
   }
@@ -618,21 +709,21 @@ function resolveLiveSessionPath(session, requestedPath) {
   let resolved = candidate;
   try { resolved = fs.realpathSync(candidate); } catch {}
   if (!isWithinPath(root, resolved)) {
-    const err = new Error('Path is outside the active session directory');
+    const err = new Error('Path is outside the active session directory') as StatusError;
     err.status = 403;
     throw err;
   }
   return resolved;
 }
 
-function openUrl(url) {
+function openUrl(url: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) return Promise.reject(new Error('Invalid URL'));
   if (process.platform === 'win32') {
     spawn('explorer.exe', [url], { detached: true, stdio: 'ignore' }).unref();
     return Promise.resolve();
   }
   const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     execFile(opener, [url], (err) => err ? reject(err) : resolve());
   });
 }
@@ -641,21 +732,21 @@ function openUrl(url) {
 // Used after prompt/steer/follow_up acks so extension-driven model/thinking
 // changes (e.g. pi-session-model's /session-model) propagate to tau and all
 // clients. Silently skips on failure — the next user input or snapshot resyncs.
-async function refreshSessionModel(session) {
+async function refreshSessionModel(session: PiRpcSession | null | undefined) {
   if (!session || session.terminating) return;
   const resp = await session.send({ type: 'get_state' }, { timeoutMs: 5000 });
-  const data = resp && (resp.data || resp.result || resp);
+  const data = (resp && (resp.data || resp.result || resp)) as RpcCommand;
   if (!data) return;
   if (data.model !== undefined) session.model = normalizeModel(data.model);
-  if (data.thinkingLevel) session.thinkingLevel = data.thinkingLevel;
+  if (data.thinkingLevel) session.thinkingLevel = String(data.thinkingLevel);
   liveManager.broadcastUpdated(session.id);
 }
 
-async function handleRpcCommand(command) {
+async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   const id = command.id;
   const cmd = command.type;
-  const success = (data) => ({ type: 'response', command: cmd, success: true, id, ...(data !== undefined ? { data } : {}) });
-  const error = (message) => ({ type: 'response', command: cmd, success: false, error: message, id });
+  const success = (data?: unknown): RpcResponse => ({ type: 'response', command: cmd, success: true, id, ...(data !== undefined ? { data } : {}) });
+  const error = (message: string): RpcResponse => ({ type: 'response', command: cmd, success: false, error: message, id });
 
   // Backend-local commands do not require a live Pi child.
   if (cmd === 'get_auth') return success({ configured: AUTH_CONFIGURED, enabled: authEnabled });
@@ -702,7 +793,7 @@ async function handleRpcCommand(command) {
       if (!sf) throw new Error('No session file to export yet');
       const args = ['--export', sf];
       if (command.outputPath) args.push(resolveExportOutputPath(command.outputPath, sf));
-      const output = await new Promise((resolve, reject) => {
+      const output = await new Promise<string>((resolve, reject) => {
         execFile('pi', args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err, stdout, stderr) => {
           if (err) reject(new Error(stderr || err.message)); else resolve(stdout);
         });
@@ -1056,12 +1147,12 @@ function resolveExportedSessionPath(filePath) {
   const resolved = path.resolve(expandHome(filePath || ''));
   const root = path.resolve(SESSIONS_DIR);
   if (!resolved.startsWith(root + path.sep) || path.extname(resolved).toLowerCase() !== '.html') {
-    const err = new Error('Can only open exported session HTML without a live session');
+    const err = new Error('Can only open exported session HTML without a live session') as StatusError;
     err.status = 403;
     throw err;
   }
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-    const err = new Error('File not found');
+    const err = new Error('File not found') as StatusError;
     err.status = 404;
     throw err;
   }
@@ -1075,19 +1166,19 @@ function resolveExportOutputPath(outputPath, sessionFile) {
   const expanded = expandHome(outputPath);
   const resolved = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(sessionDir, expanded);
   if (!isWithinPath(sessionDir, resolved) || path.extname(resolved).toLowerCase() !== '.html') {
-    const err = new Error('Export outputPath must be an .html file in the session directory');
+    const err = new Error('Export outputPath must be an .html file in the session directory') as StatusError;
     err.status = 403;
     throw err;
   }
   const parentDir = path.dirname(resolved);
   let parentReal;
   try { parentReal = fs.realpathSync(parentDir); } catch {
-    const err = new Error('Export output directory not found');
+    const err = new Error('Export output directory not found') as StatusError;
     err.status = 404;
     throw err;
   }
   if (!isWithinPath(sessionDirReal, parentReal) || (fs.existsSync(resolved) && fs.lstatSync(resolved).isSymbolicLink())) {
-    const err = new Error('Export outputPath must stay inside the session directory');
+    const err = new Error('Export outputPath must stay inside the session directory') as StatusError;
     err.status = 403;
     throw err;
   }
@@ -1100,7 +1191,7 @@ function resolveOpenPath(body) {
     const session = liveManager.get(body.sessionId);
     const resolved = resolveLiveSessionPath(session, body.filePath);
     if (!fs.existsSync(resolved)) {
-      const err = new Error('File not found');
+      const err = new Error('File not found') as StatusError;
       err.status = 404;
       throw err;
     }
@@ -1260,7 +1351,7 @@ async function shutdown(signal) {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 2500).unref();
 }
-if (require.main === module) {
+function startCli() {
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('exit', () => {
@@ -1314,6 +1405,7 @@ module.exports = {
   wss,
   computeUrls,
   listen,
+  startCli,
   SESSIONS_DIR,
   PI_AGENT_DIR,
   _setAuthForTest,

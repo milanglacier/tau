@@ -2,8 +2,44 @@
  * Session Sidebar - Lists sessions grouped by project, handles switching
  */
 
+export type SidebarSession = {
+  filePath?: string;
+  file?: string;
+  name?: string | null;
+  firstMessage?: string | null;
+  timestamp?: string;
+  sessionName?: string;
+  sessionTimestamp?: string;
+  live?: boolean;
+  tmux?: boolean;
+  [key: string]: unknown;
+};
+
+export type SidebarProject = {
+  path?: string;
+  dirName?: string;
+  sessions?: SidebarSession[];
+  [key: string]: unknown;
+};
+
+type SearchResult = SidebarSession & {
+  project?: string;
+  matches: { snippet?: string }[];
+};
+
 export class SessionSidebar {
-  constructor(container, onSessionSelect) {
+  container: HTMLElement;
+  onSessionSelect: (session: SidebarSession | null, project: SidebarProject | null) => void;
+  activeSessionFile: string | null;
+  projects: SidebarProject[];
+  collapsedProjects: Set<string>;
+  searchQuery: string;
+  favourites: string[];
+  contextMenu: HTMLElement | null;
+  _searchTimer: ReturnType<typeof setTimeout> | null = null;
+  _searchResults: SearchResult[] | null = null;
+
+  constructor(container: HTMLElement, onSessionSelect: (session: SidebarSession | null, project: SidebarProject | null) => void) {
     this.container = container;
     this.onSessionSelect = onSessionSelect;
     this.activeSessionFile = null;
@@ -17,7 +53,7 @@ export class SessionSidebar {
     document.addEventListener('click', () => this.closeContextMenu());
     document.addEventListener('contextmenu', (e) => {
       // Close if right-clicking outside a session item
-      if (!e.target.closest('.session-item')) this.closeContextMenu();
+      if (!(e.target as Element | null)?.closest('.session-item')) this.closeContextMenu();
     });
   }
 
@@ -25,11 +61,13 @@ export class SessionSidebar {
     localStorage.setItem('tau-favourites', JSON.stringify(this.favourites));
   }
 
-  isFavourite(filePath) {
+  isFavourite(filePath?: string) {
+    if (!filePath) return false;
     return this.favourites.includes(filePath);
   }
 
-  toggleFavourite(filePath) {
+  toggleFavourite(filePath?: string) {
+    if (!filePath) return;
     const idx = this.favourites.indexOf(filePath);
     if (idx >= 0) {
       this.favourites.splice(idx, 1);
@@ -55,7 +93,7 @@ export class SessionSidebar {
     }
   }
 
-  setSearchQuery(query) {
+  setSearchQuery(query: string) {
     this.searchQuery = query.toLowerCase().trim();
 
     // Clear pending full-text search
@@ -76,7 +114,7 @@ export class SessionSidebar {
     }
   }
 
-  async fullTextSearch(query) {
+  async fullTextSearch(query: string) {
     // Don't search if query changed since debounce
     if (query !== this.searchQuery) return;
 
@@ -153,7 +191,7 @@ export class SessionSidebar {
     this.container.insertBefore(group, this.container.firstChild);
   }
 
-  highlightMatch(text, query) {
+  highlightMatch(text: string, query: string) {
     if (!query) return this.escapeHtml(text);
     const escaped = this.escapeHtml(text);
     const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
@@ -197,7 +235,7 @@ export class SessionSidebar {
     });
   }
 
-  setActive(filePath) {
+  setActive(filePath?: string | null) {
     this.activeSessionFile = filePath;
     this.container.querySelectorAll('.session-item').forEach(el => {
       el.classList.toggle('active', el.dataset.filePath === filePath);
@@ -213,7 +251,7 @@ export class SessionSidebar {
   // Context Menu
   // ═══════════════════════════════════════
 
-  showContextMenu(e, session, project, itemEl) {
+  showContextMenu(e: MouseEvent, session: SidebarSession, project: SidebarProject, itemEl: HTMLElement) {
     e.preventDefault();
     this.closeContextMenu();
 
@@ -260,7 +298,7 @@ export class SessionSidebar {
     }
   }
 
-  startRename(itemEl, session) {
+  startRename(itemEl: HTMLElement, session: SidebarSession) {
     const titleEl = itemEl.querySelector('.session-title');
     if (!titleEl) return;
     const currentName = titleEl.textContent;
@@ -297,7 +335,7 @@ export class SessionSidebar {
     });
   }
 
-  async deleteSession(session, itemEl) {
+  async deleteSession(session: SidebarSession, itemEl: HTMLElement) {
     if (!confirm(`Delete "${session.name || session.firstMessage || 'this session'}"?`)) return;
     try {
       const res = await fetch('/api/sessions/delete', {
@@ -324,7 +362,7 @@ export class SessionSidebar {
     }
   }
 
-  async exportSession(session) {
+  async exportSession(session: SidebarSession) {
     try {
       const data = await (await fetch('/api/rpc', {
         method: 'POST',
@@ -345,7 +383,7 @@ export class SessionSidebar {
   // Render
   // ═══════════════════════════════════════
 
-  buildSessionItem(session, project) {
+  buildSessionItem(session: SidebarSession, project: SidebarProject) {
     const item = document.createElement('div');
     item.className = 'session-item';
     item.dataset.filePath = session.filePath;
@@ -454,7 +492,7 @@ export class SessionSidebar {
     if (this.searchQuery) this.applySearch();
   }
 
-  formatTime(isoTimestamp) {
+  formatTime(isoTimestamp?: string) {
     try {
       const date = new Date(isoTimestamp);
       const now = new Date();
@@ -474,9 +512,9 @@ export class SessionSidebar {
     }
   }
 
-  escapeHtml(text) {
+  escapeHtml(text: unknown) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = String(text ?? '');
     return div.innerHTML;
   }
 }

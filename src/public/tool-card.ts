@@ -2,20 +2,45 @@
  * Tool Card - Renders and updates tool execution cards (collapsible)
  */
 
+export type ToolArgs = Record<string, unknown>;
+
+export type ToolExecution = {
+  toolCallId?: string;
+  toolName?: string;
+  args?: ToolArgs;
+  status?: string;
+  output?: string;
+  isError?: boolean;
+};
+
+type ToolResultBlock = {
+  type?: string;
+  text?: string;
+  [key: string]: unknown;
+};
+
+type ToolResult = {
+  content?: ToolResultBlock[];
+  [key: string]: unknown;
+};
+
 export class ToolCardRenderer {
-  constructor(container) {
+  container: HTMLElement;
+  toolCards: Map<string, HTMLElement>;
+
+  constructor(container: HTMLElement) {
     this.container = container;
     this.toolCards = new Map(); // toolCallId -> element
   }
 
-  createToolCard(toolExecution) {
+  createToolCard(toolExecution: ToolExecution) {
     const { toolCallId, toolName, args, status } = toolExecution;
 
     const card = document.createElement('div');
     card.className = 'tool-card';
-    card.dataset.toolCallId = toolCallId;
+    card.dataset.toolCallId = String(toolCallId || '');
 
-    const argsPreview = this.getArgsPreview(toolName, args);
+    const argsPreview = this.getArgsPreview(String(toolName || ''), args);
     const argsJson = this.formatJson(args);
     const isExpanded = (status === 'streaming' || status === 'pending');
 
@@ -25,7 +50,7 @@ export class ToolCardRenderer {
       <div class="tool-card-header" onclick="this.parentElement.querySelector('.tool-card-body').classList.toggle('expanded'); this.querySelector('.tool-card-chevron').classList.toggle('expanded')">
         <div class="tool-header-left">
           <span class="tool-card-chevron${isExpanded ? ' expanded' : ''}"><svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor"><path d="M2 1l4 3-4 3z"/></svg></span>
-          <span class="tool-name">${this.escapeHtml(toolName)}</span>
+          <span class="tool-name">${this.escapeHtml(toolName || '')}</span>
           ${argsPreview ? `<span class="tool-args-preview">${this.escapeHtml(argsPreview)}</span>` : ''}
         </div>
         <div class="tool-header-right">
@@ -43,20 +68,20 @@ export class ToolCardRenderer {
 
     // Insert diff view for Edit tools
     if (isEdit) {
-      const diffEl = this.renderDiff(args.oldText || args.old_text, args.newText || args.new_text);
+      const diffEl = this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || ''));
       const body = card.querySelector('.tool-card-body');
       body.insertBefore(diffEl, body.firstChild);
     }
 
     this.container.appendChild(card);
-    this.toolCards.set(toolCallId, card);
+    this.toolCards.set(String(toolCallId || ''), card);
     this.scrollToBottom();
 
     return card;
   }
 
-  updateToolCard(toolExecution) {
-    let card = this.toolCards.get(toolExecution.toolCallId);
+  updateToolCard(toolExecution: ToolExecution) {
+    let card = this.toolCards.get(String(toolExecution.toolCallId || ''));
 
     if (!card) {
       card = this.createToolCard(toolExecution);
@@ -85,7 +110,7 @@ export class ToolCardRenderer {
     }
   }
 
-  finalizeToolCard(toolCallId, result, isError) {
+  finalizeToolCard(toolCallId: string, result: ToolResult, isError: boolean) {
     const card = this.toolCards.get(toolCallId);
     if (!card) return;
 
@@ -116,12 +141,12 @@ export class ToolCardRenderer {
   /**
    * Create a pre-collapsed card for session history using DOM methods (no innerHTML)
    */
-  createHistoryCard(toolExecution) {
+  createHistoryCard(toolExecution: ToolExecution) {
     const { toolCallId, toolName, args } = toolExecution;
 
     const card = document.createElement('div');
     card.className = 'tool-card';
-    card.dataset.toolCallId = toolCallId;
+    card.dataset.toolCallId = String(toolCallId || '');
 
     // Header
     const header = document.createElement('div');
@@ -137,10 +162,10 @@ export class ToolCardRenderer {
 
     const name = document.createElement('span');
     name.className = 'tool-name';
-    name.textContent = toolName;
+    name.textContent = String(toolName || '');
     headerLeft.appendChild(name);
 
-    const preview = this.getArgsPreview(toolName, args);
+    const preview = this.getArgsPreview(String(toolName || ''), args);
     if (preview) {
       const previewEl = document.createElement('span');
       previewEl.className = 'tool-args-preview';
@@ -163,7 +188,7 @@ export class ToolCardRenderer {
       const output = card.querySelector('.tool-output');
       if (!output || !output.textContent.trim()) return;
       const text = output.textContent;
-      (navigator.clipboard ? navigator.clipboard.writeText(text) : new Promise((r) => {
+      (navigator.clipboard ? navigator.clipboard.writeText(text) : new Promise<void>((r) => {
         const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px';
         document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); r();
       })).then(() => {
@@ -195,7 +220,7 @@ export class ToolCardRenderer {
     const isEdit = (toolName === 'edit' || toolName === 'Edit') && args && (args.oldText || args.old_text) && (args.newText || args.new_text);
 
     if (isEdit) {
-      body.appendChild(this.renderDiff(args.oldText || args.old_text, args.newText || args.new_text));
+      body.appendChild(this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || '')));
     } else {
       const argsJson = this.formatJson(args);
       if (argsJson) {
@@ -213,7 +238,7 @@ export class ToolCardRenderer {
     card.appendChild(body);
 
     this.container.appendChild(card);
-    this.toolCards.set(toolCallId, card);
+    this.toolCards.set(String(toolCallId || ''), card);
 
     return card;
   }
@@ -221,7 +246,7 @@ export class ToolCardRenderer {
   /**
    * Add result to a history card (stays collapsed)
    */
-  addHistoryResult(toolCallId, result, isError) {
+  addHistoryResult(toolCallId: string, result: ToolResult, isError: boolean) {
     const card = this.toolCards.get(toolCallId);
     if (!card) return;
 
@@ -240,14 +265,14 @@ export class ToolCardRenderer {
   }
 
   /** Compact preview for the header line */
-  getArgsPreview(toolName, args) {
+  getArgsPreview(toolName: string, args?: ToolArgs) {
     if (!args || Object.keys(args).length === 0) return '';
 
     // Show the most relevant arg inline
-    if (args.path) return args.path;
-    if (args.command) return args.command.substring(0, 80);
-    if (args.query) return args.query.substring(0, 60);
-    if (args.url) return args.url;
+    if (args.path) return String(args.path);
+    if (args.command) return String(args.command).substring(0, 80);
+    if (args.query) return String(args.query).substring(0, 60);
+    if (args.url) return String(args.url);
 
     // Fallback: first string value
     for (const val of Object.values(args)) {
@@ -258,7 +283,8 @@ export class ToolCardRenderer {
     return '';
   }
 
-  formatJson(obj) {
+  formatJson(obj?: ToolArgs) {
+    if (!obj) return '';
     try {
       if (Object.keys(obj).length === 0) return '';
       return JSON.stringify(obj, null, 2);
@@ -268,7 +294,7 @@ export class ToolCardRenderer {
   }
 
   /** Render a simple inline diff for Edit tool */
-  renderDiff(oldText, newText) {
+  renderDiff(oldText: string, newText: string) {
     const container = document.createElement('div');
     container.className = 'tool-diff';
 
@@ -294,12 +320,12 @@ export class ToolCardRenderer {
     return container;
   }
 
-  formatResult(result) {
+  formatResult(result: ToolResult) {
     if (!result) return '';
 
     if (result.content && Array.isArray(result.content)) {
       return result.content
-        .map(block => {
+        .map((block) => {
           if (block.type === 'text') return block.text;
           return JSON.stringify(block);
         })
@@ -309,9 +335,9 @@ export class ToolCardRenderer {
     return JSON.stringify(result, null, 2);
   }
 
-  escapeHtml(text) {
+  escapeHtml(text: unknown) {
     const div = document.createElement('div');
-    div.textContent = text;
+    div.textContent = String(text ?? '');
     return div.innerHTML;
   }
 

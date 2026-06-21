@@ -1,16 +1,19 @@
 // Tau Service Worker — minimal, just enables PWA install
 // No aggressive caching since Tau connects to a live local server
+/// <reference lib="webworker" />
 
 const CACHE_NAME = 'tau-v1';
+const serviceWorker = self as unknown as ServiceWorkerGlobalScope;
 
 // Cache only the app shell on install
-self.addEventListener('install', (event) => {
+serviceWorker.addEventListener('install', (event: ExtendableEvent) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll([
         '/',
         '/style.css',
         '/app.js',
+        '/app-main.js',
         '/state.js',
         '/themes.js',
         '/markdown.js',
@@ -23,11 +26,11 @@ self.addEventListener('install', (event) => {
       ]);
     })
   );
-  self.skipWaiting();
+  serviceWorker.skipWaiting();
 });
 
 // Clean old caches
-self.addEventListener('activate', (event) => {
+serviceWorker.addEventListener('activate', (event: ExtendableEvent) => {
   event.waitUntil(
     caches.keys().then((names) => {
       return Promise.all(
@@ -35,11 +38,11 @@ self.addEventListener('activate', (event) => {
       );
     })
   );
-  self.clients.claim();
+  serviceWorker.clients.claim();
 });
 
 // Network-first strategy — always try live server, fall back to cache
-self.addEventListener('fetch', (event) => {
+serviceWorker.addEventListener('fetch', (event: FetchEvent) => {
   const url = new URL(event.request.url);
 
   // Don't cache API/WebSocket requests

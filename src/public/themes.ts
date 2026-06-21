@@ -39,22 +39,24 @@ export const themes = {
     colors: ['#f0f2ec', '#6a7d5a', '#4a3860', '#3a6a7a'],
     vars: {},
   },
-};
+} as const;
 
-export function applyTheme(themeId) {
+export type ThemeId = keyof typeof themes;
+
+export function applyTheme(themeId: string) {
   const root = document.documentElement;
   // Validate
-  if (!themes[themeId]) themeId = 'night';
+  if (!(themeId in themes)) themeId = 'night';
   root.setAttribute('data-theme', themeId);
   localStorage.setItem('tau-theme', themeId);
 }
 
-export function getCurrentTheme() {
+export function getCurrentTheme(): ThemeId {
   const saved = localStorage.getItem('tau-theme');
   // Migrate old values
   if (saved === 'dark') return 'night';
   if (saved === 'light') return 'terracotta';
-  if (saved && themes[saved]) return saved;
+  if (saved && saved in themes) return saved as ThemeId;
   // Auto-detect from OS
   if (window.matchMedia?.('(prefers-color-scheme: light)').matches) return 'terracotta';
   return 'night';

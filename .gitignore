@@ -1,4 +1,16 @@
 node_modules/
+.npm-cache/
+.tsbuildinfo/
+*.tsbuildinfo
+
+# TypeScript build output
+/bin/*.js
+/bin/*.js.map
+/bin/*.d.ts
+/public/*.js
+/public/*.js.map
+/public/*.d.ts
+
 .DS_Store
 .idea
 .claude/settings.local.json

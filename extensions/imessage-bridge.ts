@@ -12,11 +12,33 @@
  *   BB_POLL_INTERVAL - Poll interval in ms (default: 2000)
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as http from "node:http";
 import * as https from "node:https";
+
+type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+type SendUserMessageContent = Parameters<ExtensionAPI["sendUserMessage"]>[0];
+type SendUserMessageBlock = Extract<SendUserMessageContent, readonly unknown[]>[number];
+type BlueBubblesAttachment = { guid?: string; mimeType?: string };
+type BlueBubblesChat = { chatIdentifier?: string };
+type BlueBubblesMessage = {
+  dateCreated?: number;
+  isFromMe?: boolean;
+  handle?: { address?: string };
+  chats?: BlueBubblesChat[];
+  text?: string;
+  attachments?: BlueBubblesAttachment[];
+};
+type BlueBubblesResponse<T> = {
+  data?: T;
+  message?: string;
+};
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 const BB_PASSWORD = process.env.BB_PASSWORD || "Zawsx@12";
 const BB_URL = process.env.BB_URL || "http://localhost:1234";
@@ -38,7 +60,7 @@ export default function (pi: ExtensionAPI) {
   // HTTP helpers
   // ═══════════════════════════════════════
 
-  function request(method: string, urlPath: string, body?: any): Promise<any> {
+  function request<T = unknown>(method: string, urlPath: string, body?: JsonValue): Promise<T> {
     return new Promise((resolve, reject) => {
       const url = new URL(urlPath, BB_URL);
       url.searchParams.set("password", BB_PASSWORD);
@@ -53,8 +75,8 @@ export default function (pi: ExtensionAPI) {
         let data = "";
         res.on("data", (chunk: Buffer) => data += chunk);
         res.on("end", () => {
-          try { resolve(JSON.parse(data)); }
-          catch { resolve(data); }
+          try { resolve(JSON.parse(data) as T); }
+          catch { resolve(data as T); }
         });
       });
 
@@ -116,8 +138,8 @@ export default function (pi: ExtensionAPI) {
         message: text,
       });
       log(`Sent reply (${text.length} chars)`);
-    } catch (err: any) {
-      log(`Failed to send: ${err.message}`);
+    } catch (err: unknown) {
+      log(`Failed to send: ${errorMessage(err)}`);
     }
   }
 
@@ -133,13 +155,13 @@ export default function (pi: ExtensionAPI) {
 
   async function getLatestMessageTime(): Promise<number> {
     try {
-      const res = await request("POST", "/api/v1/message/query", {
+      const res = await request<BlueBubblesResponse<BlueBubblesMessage[]>>("POST", "/api/v1/message/query", {
         limit: 1, sort: "DESC",
       });
       const msgs = res?.data || [];
       return msgs.length > 0 ? msgs[0].dateCreated || 0 : 0;
-    } catch (err: any) {
-      log(`Error getting latest message time: ${err.message}`);
+    } catch (err: unknown) {
+      log(`Error getting latest message time: ${errorMessage(err)}`);
       return 0;
     }
   }
@@ -148,7 +170,7 @@ export default function (pi: ExtensionAPI) {
     if (!enabled || !latestCtx) return;
 
     try {
-      const res = await request("POST", "/api/v1/message/query", {
+      const res = await request<BlueBubblesResponse<BlueBubblesMessage[]>>("POST", "/api/v1/message/query", {
         limit: 20,
         sort: "DESC",
         after: lastMessageTime,
@@ -172,19 +194,19 @@ export default function (pi: ExtensionAPI) {
         const fromMatt = BB_PHONE && address.includes(BB_PHONE.replace("+", ""));
         if (!fromMatt) {
           const chats = msg.chats || [];
-          const chatMatch = chats.some((c: any) => (c.chatIdentifier || "").includes(BB_PHONE));
+          const chatMatch = chats.some((c) => (c.chatIdentifier || "").includes(BB_PHONE));
           if (!chatMatch) continue;
         }
 
         // Process the message
         await processMessage(msg);
       }
-    } catch (err: any) {
-      log(`Poll error: ${err.message}`);
+    } catch (err: unknown) {
+      log(`Poll error: ${errorMessage(err)}`);
     }
   }
 
-  async function processMessage(msg: any) {
+  async function processMessage(msg: BlueBubblesMessage) {
     let text = msg.text || "";
     const attachments = msg.attachments || [];
 
@@ -228,7 +250,7 @@ export default function (pi: ExtensionAPI) {
     );
 
     if (imageAttachments.length > 0 && !voiceNotePath) {
-      const content: any[] = [];
+      const content: SendUserMessageBlock[] = [];
       if (text) content.push({ type: "text", text: `[iMessage from Matt] ${text}` });
       for (const imgPath of imageAttachments) {
         try {
@@ -237,7 +259,8 @@ export default function (pi: ExtensionAPI) {
           const mediaType = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
           content.push({
             type: "image",
-            source: { type: "base64", mediaType, data: imgData.toString("base64") },
+            data: imgData.toString("base64"),
+            mimeType: mediaType,
           });
         } catch {}
       }
@@ -257,18 +280,13 @@ export default function (pi: ExtensionAPI) {
 
     // Extract the assistant's text response from the turn
     const message = event.message;
-    if (!message) return;
+    if (message.role !== "assistant") return;
 
     // Get text content from the message
-    let responseText = "";
-    if (typeof message.content === "string") {
-      responseText = message.content;
-    } else if (Array.isArray(message.content)) {
-      responseText = message.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("\n");
-    }
+    const responseText = message.content
+      .filter((b) => b.type === "text")
+      .map((b) => b.text)
+      .join("\n");
 
     if (!responseText.trim()) return;
 
@@ -311,7 +329,7 @@ export default function (pi: ExtensionAPI) {
 
     // Check if BlueBubbles is reachable
     try {
-      const res = await request("GET", "/api/v1/ping");
+      const res = await request<BlueBubblesResponse<unknown>>("GET", "/api/v1/ping");
       if (res?.message === "pong") {
         enabled = true;
         log("Connected to BlueBubbles");
@@ -327,8 +345,8 @@ export default function (pi: ExtensionAPI) {
       } else {
         log("BlueBubbles not responding — bridge disabled");
       }
-    } catch (err: any) {
-      log(`BlueBubbles unreachable (${err.message}) — bridge disabled`);
+    } catch (err: unknown) {
+      log(`BlueBubbles unreachable (${errorMessage(err)}) — bridge disabled`);
     }
   });
 
@@ -347,13 +365,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("imessage", {
     description: "Send an iMessage to Matt",
-    args: [{ name: "message", description: "Message text", required: true }],
-    execute: async (args, ctx) => {
+    handler: async (args, ctx) => {
       if (!enabled) {
         ctx.ui.notify("iMessage bridge not connected", "error");
         return;
       }
-      const text = args.join(" ");
+      const text = args.trim();
       await sendIMessage(text);
       ctx.ui.notify(`Sent iMessage: ${text.substring(0, 50)}...`, "info");
     },
@@ -361,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("imessage-status", {
     description: "Check iMessage bridge status",
-    execute: async (_args, ctx) => {
+    handler: async (_args, ctx) => {
       ctx.ui.notify(
         enabled
           ? `iMessage bridge active. Polling every ${BB_POLL_INTERVAL / 1000}s. Last message time: ${lastMessageTime}`

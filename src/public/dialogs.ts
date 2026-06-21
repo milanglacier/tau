@@ -2,8 +2,29 @@
  * Dialogs - Handles extension UI dialogs
  */
 
+type DialogRequest = {
+  id?: string;
+  title?: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+  timeout?: number;
+  sessionId?: string;
+  method?: string;
+  [key: string]: unknown;
+};
+
 export class DialogHandler {
-  constructor(container, wsClient, getSessionId = null) {
+  container: HTMLElement;
+  wsClient: { send(data: unknown): void };
+  getSessionId: (() => string | null) | null;
+  currentDialog: HTMLElement | null;
+  currentRequest: ({ sessionId?: string; request?: DialogRequest } & Record<string, unknown>) | null;
+  timeoutId: ReturnType<typeof setTimeout> | null;
+  onIdle: (() => void) | null;
+
+  constructor(container: HTMLElement, wsClient: { send(data: unknown): void }, getSessionId: (() => string | null) | null = null) {
     this.container = container;
     this.wsClient = wsClient;
     this.getSessionId = getSessionId;

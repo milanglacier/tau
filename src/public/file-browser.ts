@@ -24,13 +24,21 @@ const FILE_ICONS = {
   default: '📄',
 };
 
-export function getFileIcon(name, isDirectory) {
+type FileItem = {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  size?: number | null;
+  mtime?: number;
+};
+
+export function getFileIcon(name: string, isDirectory: boolean) {
   if (isDirectory) return FILE_ICONS.directory;
   const ext = name.split('.').pop()?.toLowerCase() || '';
   return FILE_ICONS[ext] || FILE_ICONS.default;
 }
 
-function formatSize(bytes) {
+function formatSize(bytes?: number | null) {
   if (bytes == null) return '';
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}K`;
@@ -38,7 +46,20 @@ function formatSize(bytes) {
 }
 
 export class FileBrowser {
-  constructor(container, pathEl, messageInput, onFileInserted = null, getSessionId = null) {
+  container: HTMLElement;
+  pathEl: HTMLElement;
+  messageInput: HTMLElement;
+  onFileInserted: ((filePath: string) => void) | null;
+  getSessionId: (() => string | null) | null;
+  currentPath: string | null;
+
+  constructor(
+    container: HTMLElement,
+    pathEl: HTMLElement,
+    messageInput: HTMLElement,
+    onFileInserted: ((filePath: string) => void) | null = null,
+    getSessionId: (() => string | null) | null = null
+  ) {
     this.container = container;
     this.pathEl = pathEl;
     this.messageInput = messageInput;
@@ -49,7 +70,7 @@ export class FileBrowser {
     this.setupDropTarget();
   }
 
-  async load(dirPath) {
+  async load(dirPath?: string | null) {
     this.container.innerHTML = '<div class="file-loading">Loading…</div>';
 
     try {
@@ -93,7 +114,7 @@ export class FileBrowser {
     return /^[A-Za-z]:$/.test(parent) ? parent + sep : parent;
   }
 
-  render(items) {
+  render(items: FileItem[]) {
     this.container.innerHTML = '';
 
     if (items.length === 0) {
@@ -107,7 +128,7 @@ export class FileBrowser {
       el.draggable = true;
       el.dataset.path = item.path;
       el.dataset.name = item.name;
-      el.dataset.isDirectory = item.isDirectory;
+      el.dataset.isDirectory = String(item.isDirectory);
 
       const icon = getFileIcon(item.name, item.isDirectory);
       const size = item.isDirectory ? '' : formatSize(item.size);

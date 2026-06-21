@@ -2,8 +2,20 @@
  * Launcher — project directory picker with visual bubbles
  */
 
+type LauncherProject = {
+  name: string;
+  path: string;
+  sessionCount?: number;
+  lastActive?: number | null;
+  active?: boolean;
+};
+
 export class Launcher {
-  constructor(container, onLaunch) {
+  container: HTMLElement;
+  onLaunch: (projectPath: string) => void | Promise<void>;
+  projects: LauncherProject[];
+
+  constructor(container: HTMLElement, onLaunch: (projectPath: string) => void | Promise<void>) {
     this.container = container;
     this.onLaunch = onLaunch;
     this.projects = [];
@@ -32,7 +44,7 @@ export class Launcher {
     }
 
     // Find max session count for relative sizing
-    const maxSessions = Math.max(1, ...this.projects.map(p => p.sessionCount));
+    const maxSessions = Math.max(1, ...this.projects.map(p => p.sessionCount || 0));
     const now = Date.now();
 
     // Sort: active first, then by recency
@@ -44,7 +56,7 @@ export class Launcher {
 
     const bubbles = sorted.map(p => {
       // Size: scale between 0.7 and 1.3 based on session count
-      const sizeRatio = 0.7 + (p.sessionCount / maxSessions) * 0.6;
+      const sizeRatio = 0.7 + ((p.sessionCount || 0) / maxSessions) * 0.6;
 
       // Recency: how fresh is this project (0 = ancient, 1 = today)
       let freshness = 0;
@@ -74,16 +86,16 @@ export class Launcher {
     this.container.querySelectorAll('.launcher-bubble').forEach(btn => {
       btn.addEventListener('click', () => {
         const projectPath = btn.dataset.path;
-        if (this.onLaunch) this.onLaunch(projectPath);
+        if (projectPath) this.onLaunch(projectPath);
       });
     });
   }
 
-  escHtml(s) {
+  escHtml(s: string) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  escAttr(s) {
+  escAttr(s: string) {
     return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
   }
 }
