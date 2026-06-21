@@ -1573,10 +1573,9 @@ function selectModelSuggestion(index) {
 }
 
 function openModelPicker() {
-  if (!viewingActiveSession || !activeLiveSessionId) {
-    flashStatusError('Select a live Tau tab first.');
-    return;
-  }
+  // The model button is disabled by updateMirrorInputState when there is no
+  // active live session, so this handler is only reachable via click when a
+  // session exists.
   modelPickerInput.value = modelDisplayString();
   modelPickerActiveIndex = -1;
   modelPickerJustSelected = false;
@@ -1642,10 +1641,10 @@ async function applyModelSpec(rawSpec) {
       if (t && t.success) {
         currentThinkingLevel = parsed.thinking;
       } else {
-        const error = (t && t.error) ? t.error : 'Failed to set thinking level';
-        flashStatusError(error);
-        updateModelDisplay();
-        return { success: false, error };
+        // Non-fatal: the model was already changed on the server.
+        // Show the error but still consider the model update successful
+        // so the popup closes and the user can retry thinking separately.
+        flashStatusError((t && t.error) ? t.error : 'Failed to set thinking level');
       }
     }
     modelInput.classList.remove('invalid');

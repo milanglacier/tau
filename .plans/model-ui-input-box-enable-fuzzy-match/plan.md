@@ -123,3 +123,25 @@ Goal: Replace the header model text input with a click-to-open model picker popu
 - Do not persist or change anything on popup close/cancel/Escape/overlay click.
 - Manual model entry must still work even when the available-model list is empty or stale.
 - Thinking level remains optional and is applied only when the user includes a valid `:off|minimal|low|medium|high|xhigh` suffix.
+
+## Review of implementation (feat/model-ui-input-box-enable-fuzzy-match)
+
+### Finding 1: `openModelPicker` guard check is unreachable because the button is disabled first
+
+`openModelPicker()` at public/app.js:1539 checks `if (!viewingActiveSession || !activeLiveSessionId)` and flashes an error, but `updateMirrorInputState()` (line 2083) already sets `modelInput.disabled = !hasLiveSession` using the exact same condition. Browsers do not fire click events on disabled buttons, so this guard will never execute. The behavior is correct — the button is already disabled when there is no active session — but the guard code will never be reached and can be removed or replaced with an assertion.
+
+### Finding 2: Thinking-level failure after a successful model change leaves partial state and a persistent popup
+
+In `applyModelSpec()` at public/app.js:1632–1660, if `set_model` succeeds but the subsequent `set_thinking_level` call fails, `currentModelId` has already been updated to the new model while `currentThinkingLevel` remains at the old value. The popup stays open with an error message because the function returns `{ success: false }`. If the user closes the popup via Escape / Cancel / X / overlay click, `closeModelPicker()` never reverts the model change, so the server-side model update persists without the requested thinking level. The user is not told that the model *was* changed but the thinking level was not. Previously the old code treated thinking-level failure as non-fatal — it showed a flash error but still completed the model update successfully. This behavioral change should be acknowledged and, if intentional, the error message should clarify that the model was updated but thinking could not be set.
+
+### 3. Verdict: needs revision
+
+The implementation correctly replaces the editable input with a popup model picker, implements fuzzy completion, wires up the backend model list, and preserves all the invariants in the plan. The two issues above do not block the feature but should be addressed: the dead guard should be cleaned up, and the partial-update behavior on thinking-level failure should be either reverted to the old non-fatal treatment or given a clearer error message.
+
+### Fix for Finding 1 — Remove unreachable guard in `openModelPicker`
+
+Replaced the guard (`if (!viewingActiveSession || !activeLiveSessionId) …`) with a comment noting that the button is disabled externally by `updateMirrorInputState()`, so the handler is only reachable when a session exists.
+
+### Fix for Finding 2 — Make thinking-level failure non-fatal
+
+Changed the `set_thinking_level` failure branch in `applyModelSpec()`: instead of returning `{ success: false, error }` (which kept the popup open), the error is now flashed via `flashStatusError` and the function falls through to `return { success: true }`. The popup closes normally, the header shows the new model with the old thinking level (matching server state), and the user can retry the thinking level by reopening the picker.
