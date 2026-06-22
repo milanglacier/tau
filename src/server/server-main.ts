@@ -429,27 +429,62 @@ function liveFilesSet() {
   return new Set(liveManager.list().map((s) => s.sessionFile).filter(Boolean));
 }
 
+function normalizeSessionCwd(cwd: unknown) {
+  return typeof cwd === 'string' && cwd.trim() ? path.resolve(expandHome(cwd)) : null;
+}
+
+function readSessionHeaderCwd(filePath: string) {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(64 * 1024);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.toString('utf8', 0, bytesRead);
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line);
+      if (entry?.type === 'session') return normalizeSessionCwd(entry.cwd);
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+  return null;
+}
+
 function serveProjectsList(res: ServerResponse) {
   const projectsDir = TAU_SETTINGS.projectsDir;
   if (!projectsDir || !fs.existsSync(projectsDir)) return json(res, 200, { projects: [], ...(projectsDir ? { error: 'Directory not found' } : {}) });
   try {
-    const sessionInfo = new Map();
+    const projectsRoot = path.resolve(projectsDir);
+    const sessionInfo = new Map<string, { count: number; lastActive: number }>();
     if (fs.existsSync(SESSIONS_DIR)) {
       for (const dir of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
         if (!dir.isDirectory()) continue;
-        const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
-        if (!decodedPath.startsWith(projectsDir)) continue;
         const files = fs.readdirSync(path.join(SESSIONS_DIR, dir.name)).filter((f: string) => f.endsWith('.jsonl'));
+        let sessionCwd: string | null = null;
         let lastActive = 0;
-        for (const f of files) { try { lastActive = Math.max(lastActive, fs.statSync(path.join(SESSIONS_DIR, dir.name, f)).mtimeMs); } catch {} }
-        sessionInfo.set(decodedPath, { count: files.length, lastActive });
+        for (const f of files) {
+          const filePath = path.join(SESSIONS_DIR, dir.name, f);
+          try {
+            lastActive = Math.max(lastActive, fs.statSync(filePath).mtimeMs);
+            if (!sessionCwd) sessionCwd = readSessionHeaderCwd(filePath);
+          } catch {}
+        }
+        const projectPath = sessionCwd;
+        if (!projectPath) continue;
+        if (!isWithinPath(projectsRoot, projectPath)) continue;
+        sessionInfo.set(projectPath, { count: files.length, lastActive });
       }
     }
     const liveCwds = new Set(liveManager.list().map((s) => s.cwd));
-    const projects = fs.readdirSync(projectsDir, { withFileTypes: true })
+    const projects = fs.readdirSync(projectsRoot, { withFileTypes: true })
       .filter((e: Dirent) => e.isDirectory() && !e.name.startsWith('.'))
       .map((e: Dirent) => {
-        const fullPath = path.join(projectsDir, e.name);
+        const fullPath = path.join(projectsRoot, e.name);
         const info = sessionInfo.get(fullPath) || { count: 0, lastActive: 0 };
         return { name: e.name, path: fullPath, sessionCount: info.count, lastActive: info.lastActive || null, active: liveCwds.has(fullPath) };
       });
@@ -460,24 +495,30 @@ function serveProjectsList(res: ServerResponse) {
 async function serveSessionsList(res: ServerResponse) {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) return json(res, 200, { projects: [] });
-    const projects = [];
+    const projectsByPath = new Map<string, { path: string; dirName: string; sessions: Array<Record<string, unknown>> }>();
     const liveFiles = liveFilesSet();
     for (const dir of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
       if (!dir.isDirectory()) continue;
       const projectDir = path.join(SESSIONS_DIR, dir.name);
-      const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
-      const sessions = [];
       for (const file of fs.readdirSync(projectDir).filter((f: string) => f.endsWith('.jsonl'))) {
         try {
           const filePath = path.join(projectDir, file);
           const parsed = await parseSessionFile(filePath);
-          if (parsed) sessions.push({ ...parsed, file, filePath, mtime: fs.statSync(filePath).mtimeMs, live: liveFiles.has(filePath) });
+          if (parsed) {
+            const projectPath = parsed.cwd || '';
+            let project = projectsByPath.get(projectPath);
+            if (!project) {
+              project = { path: projectPath, dirName: dir.name, sessions: [] };
+              projectsByPath.set(projectPath, project);
+            }
+            project.sessions.push({ ...parsed, file, filePath, mtime: fs.statSync(filePath).mtimeMs, live: liveFiles.has(filePath) });
+          }
         } catch {}
       }
-      sessions.sort((a, b) => b.mtime - a.mtime);
-      if (sessions.length) projects.push({ path: decodedPath, dirName: dir.name, sessions });
     }
-    projects.sort((a, b) => (b.sessions[0]?.mtime || 0) - (a.sessions[0]?.mtime || 0));
+    const projects = Array.from(projectsByPath.values());
+    for (const project of projects) project.sessions.sort((a, b) => Number(b.mtime || 0) - Number(a.mtime || 0));
+    projects.sort((a, b) => Number(b.sessions[0]?.mtime || 0) - Number(a.sessions[0]?.mtime || 0));
     json(res, 200, { projects });
   } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
@@ -504,7 +545,7 @@ async function parseSessionFile(filePath: string) {
   }
   rl.close(); stream.destroy();
   if (!header?.id || (userMessageCount <= 1 && lineCount <= 8)) return null;
-  return { id: header.id, timestamp: header.timestamp || '', name: sessionName, firstMessage, cwd: header.cwd || null };
+  return { id: header.id, timestamp: header.timestamp || '', name: sessionName, firstMessage, cwd: normalizeSessionCwd(header.cwd) };
 }
 
 function serveSessionFile(res: ServerResponse, dirName: string, file: string) {
@@ -632,19 +673,19 @@ async function serveSearch(res: ServerResponse, query: string) {
     for (const dir of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
       if (!dir.isDirectory() || results.length >= 30) continue;
       const projectDir = path.join(SESSIONS_DIR, dir.name);
-      const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
       for (const file of fs.readdirSync(projectDir).filter((f: string) => f.endsWith('.jsonl'))) {
         if (results.length >= 30) break;
         const filePath = path.join(projectDir, file);
         const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
         const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
         let sessionId = '', sessionName = '', sessionTimestamp = '', firstMessage = '';
+        let sessionCwd: string | null = null;
         const matches = [];
         for await (const line of rl) {
           if (!line.trim()) continue;
           try {
             const entry = JSON.parse(line);
-            if (entry.type === 'session') { sessionId = entry.id; sessionTimestamp = entry.timestamp || ''; }
+            if (entry.type === 'session') { sessionId = entry.id; sessionTimestamp = entry.timestamp || ''; sessionCwd = normalizeSessionCwd(entry.cwd); }
             if (entry.type === 'session_info' && entry.name) sessionName = entry.name;
             if (entry.type === 'message') {
               const c = entry.message?.content;
@@ -659,7 +700,7 @@ async function serveSearch(res: ServerResponse, query: string) {
           } catch {}
         }
         rl.close(); stream.destroy();
-        if (matches.length) results.push({ filePath, project: decodedPath, sessionId, sessionName, sessionTimestamp, firstMessage, matches });
+        if (matches.length) results.push({ filePath, project: sessionCwd || '', sessionId, sessionName, sessionTimestamp, firstMessage, matches });
       }
     }
     json(res, 200, { results });

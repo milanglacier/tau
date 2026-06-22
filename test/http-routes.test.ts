@@ -22,9 +22,15 @@ let base = '';
 const PROJ_DIR = path.join(SESSIONS_DIR, '--tmp--httpproj');
 const SESSION_FILE = path.join(PROJ_DIR, 's.jsonl');
 
+function writeSessionFileAt(projectDir: string, fileName: string, lines: Array<Record<string, unknown>>) {
+  fs.mkdirSync(projectDir, { recursive: true });
+  const filePath = path.join(projectDir, fileName);
+  fs.writeFileSync(filePath, lines.map((l: Record<string, unknown>) => JSON.stringify(l)).join('\n') + '\n');
+  return filePath;
+}
+
 function writeSessionFile(lines: Array<Record<string, unknown>>) {
-  fs.mkdirSync(PROJ_DIR, { recursive: true });
-  fs.writeFileSync(SESSION_FILE, lines.map((l: Record<string, unknown>) => JSON.stringify(l)).join('\n') + '\n');
+  writeSessionFileAt(PROJ_DIR, 's.jsonl', lines);
 }
 
 interface FakeHttpSession {
@@ -336,6 +342,40 @@ test('GET /api/search returns an empty result list for a too-short query', async
   assert.deepEqual(body.results, []);
 });
 
+test('GET /api/sessions preserves hyphenated project cwd from the session header', async () => {
+  const projectPath = path.join(PROJECTS_DIR, 'agent-scratch');
+  const encodedDir = path.join(SESSIONS_DIR, '--tmp--agent-scratch');
+  writeSessionFileAt(encodedDir, 'hyphen.jsonl', [
+    { type: 'session', id: 'hyphen', timestamp: '2026-01-01T00:00:00.000Z', cwd: projectPath },
+    { type: 'message', message: { role: 'user', content: 'first message' } },
+    { type: 'message', message: { role: 'assistant', content: 'reply' } },
+    { type: 'message', message: { role: 'user', content: 'second message' } },
+  ]);
+
+  const res = await fetch(`${base}/api/sessions`);
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  const project = body.projects.find((p: { path: string }) => p.path === path.resolve(projectPath));
+  assert.ok(project);
+  assert.equal(path.basename(project.path), 'agent-scratch');
+  assert.ok(!project.path.includes(`${path.sep}agent${path.sep}scratch`));
+});
+
+test('GET /api/search returns the hyphenated project cwd from the session header', async () => {
+  const projectPath = path.join(PROJECTS_DIR, 'agent-scratch');
+  const encodedDir = path.join(SESSIONS_DIR, '--tmp--agent-scratch-search');
+  writeSessionFileAt(encodedDir, 'hyphen-search.jsonl', [
+    { type: 'session', id: 'hyphen-search', timestamp: '2026-01-01T00:00:00.000Z', cwd: projectPath },
+    { type: 'message', message: { role: 'user', content: 'please find hyphenneedle here' } },
+  ]);
+
+  const res = await fetch(`${base}/api/search?q=hyphenneedle`);
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].project, path.resolve(projectPath));
+});
+
 test('GET /api/projects lists project directories under the configured projects dir', async () => {
   fs.mkdirSync(path.join(PROJECTS_DIR, 'myproj'), { recursive: true });
   const res = await fetch(`${base}/api/projects`);
@@ -345,6 +385,22 @@ test('GET /api/projects lists project directories under the configured projects 
   assert.ok(names.includes('myproj'));
   const proj = body.projects.find((p: { name: string; active: boolean }) => p.name === 'myproj');
   assert.equal(proj.active, false);
+});
+
+test('GET /api/projects counts sessions for hyphenated project names using header cwd', async () => {
+  const projectPath = path.join(PROJECTS_DIR, 'agent-scratch');
+  fs.mkdirSync(projectPath, { recursive: true });
+  writeSessionFileAt(path.join(SESSIONS_DIR, '--tmp--agent-scratch-projects'), 'hyphen-projects.jsonl', [
+    { type: 'session', id: 'hyphen-projects', timestamp: '2026-01-01T00:00:00.000Z', cwd: projectPath },
+    { type: 'message', message: { role: 'user', content: 'project count message' } },
+  ]);
+
+  const res = await fetch(`${base}/api/projects`);
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  const proj = body.projects.find((p: { name: string; sessionCount: number }) => p.name === 'agent-scratch');
+  assert.ok(proj);
+  assert.ok(proj.sessionCount >= 1);
 });
 
 test('GET /api/files lists the directory for a live session', async () => {
