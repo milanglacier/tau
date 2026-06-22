@@ -2,7 +2,7 @@
  * File Browser — right sidebar file tree with drag-and-drop
  */
 
-const FILE_ICONS = {
+const FILE_ICONS: Record<string, string> = {
   // Folders
   directory: '📁',
   // Code
@@ -158,6 +158,7 @@ export class FileBrowser {
 
       // Drag start
       el.addEventListener('dragstart', (e) => {
+        if (!e.dataTransfer) return;
         e.dataTransfer.setData('text/plain', item.path);
         e.dataTransfer.effectAllowed = 'copy';
         el.classList.add('dragging');
@@ -171,7 +172,7 @@ export class FileBrowser {
     }
   }
 
-  async openNatively(filePath) {
+  async openNatively(filePath: string) {
     try {
       const sessionId = this.getSessionId?.();
       if (!sessionId) return;
@@ -185,10 +186,10 @@ export class FileBrowser {
     }
   }
 
-  insertPath(filePath) {
+  insertPath(filePath: string) {
     const input = this.messageInput;
-    const start = input.selectionStart;
-    const end = input.selectionEnd;
+    const start = input.selectionStart ?? 0;
+    const end = input.selectionEnd ?? 0;
     input.value = input.value.substring(0, start) + filePath + ' ' + input.value.substring(end);
     input.selectionStart = input.selectionEnd = start + filePath.length + 1;
     input.focus();
@@ -201,7 +202,7 @@ export class FileBrowser {
 
     input.addEventListener('dragover', (e) => {
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'copy';
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
       input.classList.add('file-drop-hover');
     });
 
@@ -213,7 +214,7 @@ export class FileBrowser {
       e.preventDefault();
       input.classList.remove('file-drop-hover');
 
-      const filePath = e.dataTransfer.getData('text/plain');
+      const filePath = e.dataTransfer?.getData('text/plain') ?? '';
       // Accept Unix paths (/) and Windows paths (C:\ or C:/)
       if (filePath && (filePath.startsWith('/') || /^[A-Za-z]:[\\\/]/.test(filePath))) {
         this.insertPath(filePath);

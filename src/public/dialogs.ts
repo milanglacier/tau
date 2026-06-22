@@ -2,7 +2,7 @@
  * Dialogs - Handles extension UI dialogs
  */
 
-type DialogRequest = {
+export type DialogRequest = {
   id?: string;
   title?: string;
   message?: string;
@@ -20,7 +20,7 @@ export class DialogHandler {
   wsClient: { send(data: unknown): void };
   getSessionId: (() => string | null) | null;
   currentDialog: HTMLElement | null;
-  currentRequest: ({ sessionId?: string; request?: DialogRequest } & Record<string, unknown>) | null;
+  currentRequest: ({ sessionId?: string | null; request?: DialogRequest | null } & Record<string, unknown>) | null;
   timeoutId: ReturnType<typeof setTimeout> | null;
   onIdle: (() => void) | null;
 
@@ -34,7 +34,7 @@ export class DialogHandler {
     this.onIdle = null;
   }
 
-  showSelect(request) {
+  showSelect(request: DialogRequest) {
     this.cancelCurrentDialog(true);
 
     const { id, title, options, timeout, sessionId } = request;
@@ -49,9 +49,9 @@ export class DialogHandler {
       </div>
     `;
 
-    const optionsContainer = dialog.querySelector('#dialog-options');
+    const optionsContainer = dialog.querySelector('#dialog-options')!;
     
-    (options || []).forEach(option => {
+    (options || []).forEach((option: string) => {
       const optionDiv = document.createElement('div');
       optionDiv.className = 'dialog-option';
       optionDiv.textContent = option;
@@ -61,14 +61,14 @@ export class DialogHandler {
       optionsContainer.appendChild(optionDiv);
     });
 
-    dialog.querySelector('#dialog-cancel').onclick = () => {
+    dialog.querySelector('#dialog-cancel')!.onclick = () => {
       this.respond(id, { cancelled: true }, sessionId);
     };
 
     this.showDialog(dialog, timeout, id, sessionId, request);
   }
 
-  showConfirm(request) {
+  showConfirm(request: DialogRequest) {
     this.cancelCurrentDialog(true);
 
     const { id, title, message, timeout, sessionId } = request;
@@ -84,18 +84,18 @@ export class DialogHandler {
       </div>
     `;
 
-    dialog.querySelector('#dialog-yes').onclick = () => {
+    dialog.querySelector('#dialog-yes')!.onclick = () => {
       this.respond(id, { confirmed: true }, sessionId);
     };
 
-    dialog.querySelector('#dialog-no').onclick = () => {
+    dialog.querySelector('#dialog-no')!.onclick = () => {
       this.respond(id, { confirmed: false }, sessionId);
     };
 
     this.showDialog(dialog, timeout, id, sessionId, request);
   }
 
-  showInput(request) {
+  showInput(request: DialogRequest) {
     this.cancelCurrentDialog(true);
 
     const { id, title, placeholder, timeout, sessionId } = request;
@@ -111,19 +111,20 @@ export class DialogHandler {
       </div>
     `;
 
-    const input = dialog.querySelector('#dialog-input');
+    const input = dialog.querySelector<HTMLInputElement>('#dialog-input');
+    if (!input) return;
     
     const submit = () => {
       const value = input.value.trim();
       this.respond(id, value ? { value } : { cancelled: true }, sessionId);
     };
 
-    input.addEventListener('keypress', (e) => {
+    input.addEventListener('keypress', (e: KeyboardEvent) => {
       if (e.key === 'Enter') submit();
     });
 
-    dialog.querySelector('#dialog-submit').onclick = submit;
-    dialog.querySelector('#dialog-cancel').onclick = () => {
+    dialog.querySelector('#dialog-submit')!.onclick = submit;
+    dialog.querySelector('#dialog-cancel')!.onclick = () => {
       this.respond(id, { cancelled: true }, sessionId);
     };
 
@@ -133,7 +134,7 @@ export class DialogHandler {
     setTimeout(() => input.focus(), 100);
   }
 
-  showEditor(request) {
+  showEditor(request: DialogRequest) {
     this.cancelCurrentDialog(true);
 
     const { id, title, prefill, timeout, sessionId } = request;
@@ -149,14 +150,15 @@ export class DialogHandler {
       </div>
     `;
 
-    const textarea = dialog.querySelector('#dialog-textarea');
+    const textarea = dialog.querySelector<HTMLTextAreaElement>('#dialog-textarea');
+    if (!textarea) return;
 
-    dialog.querySelector('#dialog-save').onclick = () => {
+    dialog.querySelector('#dialog-save')!.onclick = () => {
       const value = textarea.value;
       this.respond(id, value ? { value } : { cancelled: true }, sessionId);
     };
 
-    dialog.querySelector('#dialog-cancel').onclick = () => {
+    dialog.querySelector('#dialog-cancel')!.onclick = () => {
       this.respond(id, { cancelled: true }, sessionId);
     };
 
@@ -166,7 +168,7 @@ export class DialogHandler {
     setTimeout(() => textarea.focus(), 100);
   }
 
-  showNotification(request) {
+  showNotification(request: DialogRequest) {
     const { message, notifyType } = request;
     
     // Create a temporary notification element
@@ -187,7 +189,7 @@ export class DialogHandler {
     }
   }
 
-  showDialog(dialogElement, timeout, requestId, sessionId = null, request = null) {
+  showDialog(dialogElement: HTMLElement, timeout: number | undefined, requestId: string | undefined, sessionId: string | null = null, request: DialogRequest | null = null) {
     this.currentDialog = dialogElement;
     this.currentRequest = { id: requestId, sessionId, request };
     this.container.innerHTML = '';
@@ -230,7 +232,7 @@ export class DialogHandler {
     this.currentRequest = null;
   }
 
-  respond(id, response, sessionId = null) {
+  respond(id: string | undefined, response: Record<string, unknown>, sessionId: string | null = null) {
     this.clearCurrentDialog();
     this.wsClient.send({
       type: 'extension_ui_response',
@@ -241,7 +243,7 @@ export class DialogHandler {
     this.onIdle?.();
   }
 
-  escapeHtml(text) {
+  escapeHtml(text: string) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;

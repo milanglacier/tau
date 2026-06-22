@@ -32,7 +32,7 @@ export class SessionSidebar {
   onSessionSelect: (session: SidebarSession | null, project: SidebarProject | null) => void;
   activeSessionFile: string | null;
   projects: SidebarProject[];
-  collapsedProjects: Set<string>;
+  collapsedProjects: Set<string | undefined>;
   searchQuery: string;
   favourites: string[];
   contextMenu: HTMLElement | null;
@@ -173,7 +173,7 @@ export class SessionSidebar {
       // Find the matching project/session to pass to onSessionSelect
       item.addEventListener('click', () => {
         for (const project of this.projects) {
-          const session = project.sessions.find(s => s.filePath === result.filePath);
+          const session = project.sessions?.find(s => s.filePath === result.filePath);
           if (session) {
             this.onSessionSelect(session, project);
             return;
@@ -236,7 +236,7 @@ export class SessionSidebar {
   }
 
   setActive(filePath?: string | null) {
-    this.activeSessionFile = filePath;
+    this.activeSessionFile = filePath ?? null;
     this.container.querySelectorAll('.session-item').forEach(el => {
       el.classList.toggle('active', el.dataset.filePath === filePath);
     });
@@ -346,10 +346,12 @@ export class SessionSidebar {
       if (res.ok) {
         itemEl.remove();
         // Remove from favourites if present
-        const favIdx = this.favourites.indexOf(session.filePath);
-        if (favIdx >= 0) {
-          this.favourites.splice(favIdx, 1);
-          this.saveFavourites();
+        if (session.filePath) {
+          const favIdx = this.favourites.indexOf(session.filePath);
+          if (favIdx >= 0) {
+            this.favourites.splice(favIdx, 1);
+            this.saveFavourites();
+          }
         }
         // If this was the active session, clear it
         if (session.filePath === this.activeSessionFile) {
@@ -423,7 +425,7 @@ export class SessionSidebar {
     // Favourites section — collect from all projects
     const favSessions = [];
     for (const project of this.projects) {
-      for (const session of project.sessions) {
+      for (const session of project.sessions || []) {
         if (this.isFavourite(session.filePath)) {
           favSessions.push({ session, project });
         }
@@ -457,13 +459,13 @@ export class SessionSidebar {
       const header = document.createElement('div');
       header.className = `project-header${isCollapsed ? ' collapsed' : ''}`;
 
-      const pathParts = project.path.split('/').filter(Boolean);
-      const shortPath = pathParts.length > 0 ? pathParts[pathParts.length - 1] : project.path;
+      const pathParts = (project.path || '').split('/').filter(Boolean);
+      const shortPath = pathParts.length > 0 ? pathParts[pathParts.length - 1] : (project.path || '');
 
       header.innerHTML = `
         <span class="chevron">▼</span>
         <span title="${this.escapeHtml(project.path)}">${this.escapeHtml(shortPath)}</span>
-        <span class="project-count">${project.sessions.length}</span>
+        <span class="project-count">${(project.sessions || []).length}</span>
       `;
 
       header.addEventListener('click', () => {
@@ -481,7 +483,7 @@ export class SessionSidebar {
       const sessionsDiv = document.createElement('div');
       sessionsDiv.className = `project-sessions${isCollapsed ? ' collapsed' : ''}`;
 
-      for (const session of project.sessions) {
+      for (const session of project.sessions || []) {
         sessionsDiv.appendChild(this.buildSessionItem(session, project));
       }
 
@@ -494,7 +496,7 @@ export class SessionSidebar {
 
   formatTime(isoTimestamp?: string) {
     try {
-      const date = new Date(isoTimestamp);
+      const date = new Date(isoTimestamp || '');
       const now = new Date();
       const diffMs = now.getTime() - date.getTime();
       const diffMins = Math.floor(diffMs / 60000);

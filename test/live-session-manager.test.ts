@@ -7,18 +7,29 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const { WebSocket } = require('ws');
 const { LiveSessionManager, _setSpawnPiForTest } = require('../bin/tau.js');
+import type { TestContext } from 'node:test';
 
-function openClient() {
-  // stub ws client that looks open to the broadcaster
-  const sent = [];
-  return { readyState: WebSocket.OPEN, send: (data) => sent.push(data), sent };
+interface StubClient {
+  readyState: number;
+  send: (data: string) => void;
+  sent: string[];
 }
-function closedClient() {
+
+function openClient(): StubClient {
+  // stub ws client that looks open to the broadcaster
+  const sent: string[] = [];
+  return { readyState: WebSocket.OPEN, send: (data: string) => sent.push(data), sent };
+}
+function closedClient(): StubClient {
   return { readyState: WebSocket.CLOSING, sent: [], send: () => { throw new Error('should not send to closed client'); } };
 }
 
-function fakeSession(id, opts: any = {}) {
-  const meta = {
+function fakeSession(id: string, opts: { name?: string } = {}) {
+  const meta: {
+    id: string; pid: number; cwd: string; modelSpec: string; model: string; modelLabel: string;
+    thinkingLevel: string; sessionFile: string; sessionName: string | null; isStreaming: boolean;
+    createdAt: string; lastActiveAt: string; contextUsage: null;
+  } = {
     id,
     pid: 123,
     cwd: '/tmp',
@@ -33,11 +44,11 @@ function fakeSession(id, opts: any = {}) {
     lastActiveAt: '2026-01-01T00:00:00.000Z',
     contextUsage: null,
   };
-  const calls = { terminated: [], terminatedArgs: [] };
+  const calls: { terminated: boolean[]; terminatedArgs: string[] } = { terminated: [], terminatedArgs: [] };
   return {
     id,
     metadata: () => ({ ...meta }),
-    terminate: async (reason) => { calls.terminated.push(true); calls.terminatedArgs.push(reason); },
+    terminate: async (reason: string) => { calls.terminated.push(true); calls.terminatedArgs.push(reason); },
     calls,
   };
 }
@@ -140,11 +151,11 @@ function makeFakeChild() {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.pid = 12345;
-  child.kill = (sig) => { child.killedSignal = sig; };
+  child.kill = (sig: string) => { child.killedSignal = sig; };
   return child;
 }
 
-test('create() resolves cwd, stores the session, and broadcasts live_session_created', async (t) => {
+test('create() resolves cwd, stores the session, and broadcasts live_session_created', async (t: TestContext) => {
   // Mock the startup setTimeouts in start() so the test does not wait on
   // wall-clock time for the 100ms startup grace.
   t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -176,7 +187,7 @@ test('create() resolves cwd, stores the session, and broadcasts live_session_cre
   assert.equal(msg.session.modelLabel, 'openai/gpt-5.5');
 });
 
-test('create() rejects when the cwd does not exist', async (t) => {
+test('create() rejects when the cwd does not exist', async (t: TestContext) => {
   _setSpawnPiForTest(() => makeFakeChild());
   t.after(() => _setSpawnPiForTest(null));
   const mgr = new LiveSessionManager();

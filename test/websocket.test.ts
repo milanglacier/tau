@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { WebSocket, WebSocketServer } = require('ws');
+import type { TestContext } from 'node:test';
+import type { WebSocket as WsWebSocket } from 'ws';
 
 // Loopback + isolated settings tree.
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-ws-'));
@@ -17,7 +19,22 @@ const { server, computeUrls, liveManager, _setAuthForTest } = require('../bin/ta
 let base = '';
 let wsUrl = '';
 
-function fakeSession(id) {
+interface FakeWsSession {
+  id: string;
+  cwd: string;
+  model: string;
+  modelSpec: string;
+  thinkingLevel: string;
+  isStreaming: boolean;
+  sessionFile: string;
+  sessionName: string | null;
+  contextUsage: { tokens?: number } | null;
+  metadata: () => { id: string; cwd: string; model: string; isStreaming: boolean };
+  snapshot: () => { session: { id: string }; entries: unknown[]; model: string; isStreaming: boolean };
+  terminate: () => Promise<void>;
+}
+
+function fakeSession(id: string): FakeWsSession {
   return {
     id,
     cwd: '/tmp/proj',
@@ -34,7 +51,7 @@ function fakeSession(id) {
   };
 }
 
-before((t, done) => {
+before((t: TestContext, done: () => void) => {
   _setAuthForTest(false);
   server.listen(0, '127.0.0.1', () => {
     const port = server.address().port;
@@ -45,7 +62,7 @@ before((t, done) => {
   });
 });
 
-after((t, done) => {
+after((t: TestContext, done: () => void) => {
   server.close(done);
 });
 
@@ -61,11 +78,11 @@ function connect(opts: any = {}) {
   return ws;
 }
 
-function nextMessage(ws, timeout = 2000): Promise<any> {
+function nextMessage(ws: WsWebSocket, timeout = 2000): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for WS message')), timeout);
-    ws.once('message', (data) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });
-    ws.once('error', (e) => { clearTimeout(timer); reject(e); });
+    ws.once('message', (data: Buffer) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });
+    ws.once('error', (e: Error) => { clearTimeout(timer); reject(e); });
   });
 }
 

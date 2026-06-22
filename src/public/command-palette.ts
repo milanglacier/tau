@@ -6,10 +6,12 @@ type CommandPaletteItem = {
 };
 
 export function setupCommandPalette(commands: CommandPaletteItem[]) {
-  const commandBtn = document.getElementById('command-btn');
-  const commandPalette = document.getElementById('command-palette');
-  const commandPaletteOverlay = document.getElementById('command-palette-overlay');
-  const commandList = document.getElementById('command-list');
+  // These elements are part of the app's static index.html shell, so they
+  // are present when this setup function runs; assert non-null at the query.
+  const commandBtn = document.getElementById('command-btn')!;
+  const commandPalette = document.getElementById('command-palette')!;
+  const commandPaletteOverlay = document.getElementById('command-palette-overlay')!;
+  const commandList = document.getElementById('command-list')!;
 
   function open() {
     commandList.innerHTML = '';

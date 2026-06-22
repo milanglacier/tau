@@ -40,7 +40,8 @@ export function setupLauncherPanel({ launcherEl, messagesContainer, createSessio
   function show() {
     launcherEl.classList.remove('hidden');
     messagesContainer.style.display = 'none';
-    document.querySelector<HTMLElement>('.input-area').style.display = 'none';
+    const inputArea = document.querySelector<HTMLElement>('.input-area');
+    if (inputArea) inputArea.style.display = 'none';
     document.querySelector('.welcome')?.remove();
 
     document.querySelectorAll('.mode-link').forEach(l => l.classList.remove('active'));
@@ -52,7 +53,8 @@ export function setupLauncherPanel({ launcherEl, messagesContainer, createSessio
   function hide() {
     launcherEl.classList.add('hidden');
     messagesContainer.style.display = '';
-    document.querySelector<HTMLElement>('.input-area').style.display = '';
+    const inputArea = document.querySelector<HTMLElement>('.input-area');
+    if (inputArea) inputArea.style.display = '';
 
     document.querySelectorAll('.mode-link').forEach(l => l.classList.remove('active'));
     document.querySelector('.mode-link:first-child')?.classList.add('active');

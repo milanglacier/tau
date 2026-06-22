@@ -78,7 +78,7 @@ export class MessageRenderer {
     }
 
     div.innerHTML = `
-      <div class="message-content">${imagesHtml}${renderUserMarkdown(message.content)}</div>
+      <div class="message-content">${imagesHtml}${renderUserMarkdown(message.content as string)}</div>
       <button class="message-copy-btn" aria-label="Copy message"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
     `;
     this._setupCopyBtn(div);
@@ -103,7 +103,7 @@ export class MessageRenderer {
     } else if (Array.isArray(message.content)) {
       for (const block of message.content) {
         if (block.type === 'text') {
-          contentHtml += isStreaming ? this.escapeHtml(block.text) : renderMarkdown(block.text);
+          contentHtml += isStreaming ? this.escapeHtml(block.text) : renderMarkdown(block.text || '');
         } else if (block.type === 'thinking') {
           contentHtml += this.renderThinkingBlock(block.thinking);
         }
@@ -113,7 +113,7 @@ export class MessageRenderer {
     // Usage/cost info
     if (message.usage && message.usage.cost) {
       const cost = message.usage.cost.total;
-      if (cost > 0) {
+      if (cost && cost > 0) {
         usageHtml = `<span class="message-usage">$${cost.toFixed(4)}</span>`;
       }
     }
@@ -238,12 +238,15 @@ export class MessageRenderer {
     }
 
     // Add usage info if available
-    if (usage && usage.cost && usage.cost.total > 0) {
-      if (!messageElement.querySelector('.message-usage')) {
-        const span = document.createElement('span');
-        span.className = 'message-usage';
-        span.textContent = `$${usage.cost.total.toFixed(4)}`;
-        messageElement.appendChild(span);
+    if (usage && usage.cost) {
+      const total = usage.cost.total;
+      if (total && total > 0) {
+        if (!messageElement.querySelector('.message-usage')) {
+          const span = document.createElement('span');
+          span.className = 'message-usage';
+          span.textContent = `$${total.toFixed(4)}`;
+          messageElement.appendChild(span);
+        }
       }
     }
   }

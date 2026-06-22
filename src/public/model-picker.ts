@@ -1,5 +1,15 @@
 import type { ModelRecord, RpcCommand } from './app-types.js';
 
+type NormalizedModel = {
+  provider: string;
+  id: string;
+  label: string;
+  contextWindow?: string | number;
+  maxOutput?: string | number;
+  thinking?: boolean | string;
+  images?: boolean | string;
+};
+
 type ModelPickerOptions = {
   getActiveLiveSessionId(): string | null;
   isViewingActiveSession(): boolean;
@@ -17,15 +27,17 @@ export function setupModelPicker(options: ModelPickerOptions) {
 // Model Picker
 // ═══════════════════════════════════════
 
-const modelInput = document.getElementById('model-input');
-const modelPickerOverlay = document.getElementById('model-picker-overlay');
-const modelPicker = document.getElementById('model-picker');
-const modelPickerInput = document.getElementById('model-picker-input');
-const modelPickerList = document.getElementById('model-picker-list');
-const modelPickerMessage = document.getElementById('model-picker-message');
-const modelPickerClose = document.getElementById('model-picker-close');
-const modelPickerCancel = document.getElementById('model-picker-cancel');
-const modelPickerSave = document.getElementById('model-picker-save');
+// All element lookups below query the app's static index.html shell, which is
+// present before this setup function runs; assert non-null at the query site.
+const modelInput = document.getElementById('model-input')!;
+const modelPickerOverlay = document.getElementById('model-picker-overlay')!;
+const modelPicker = document.getElementById('model-picker')!;
+const modelPickerInput = document.getElementById('model-picker-input')!;
+const modelPickerList = document.getElementById('model-picker-list')!;
+const modelPickerMessage = document.getElementById('model-picker-message')!;
+const modelPickerClose = document.getElementById('model-picker-close')!;
+const modelPickerCancel = document.getElementById('model-picker-cancel')!;
+const modelPickerSave = document.getElementById('model-picker-save')!;
 const VALID_THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 const MODEL_PICKER_HELP = 'Type provider or model name; optional :off|minimal|low|medium|high|xhigh';
 let currentModelId: ModelRecord | string = '';
@@ -69,7 +81,7 @@ function updateModelDisplay() {
   modelInput.classList.remove('invalid');
 }
 
-function parseModelSpec(raw) {
+function parseModelSpec(raw: string) {
   const trimmed = String(raw || '').trim();
   if (!trimmed) {
     return { error: 'Use format provider/model[:thinking], e.g. opencode-go/deepseek-v4-pro:xhigh' };
@@ -102,12 +114,12 @@ function parseModelSpec(raw) {
   return { provider, modelId, thinking };
 }
 
-function normalizeAvailableModel(model) {
+function normalizeAvailableModel(model: ModelRecord | string): NormalizedModel | null {
   if (!model) return null;
   if (typeof model === 'string') {
     const slashIdx = model.indexOf('/');
     if (slashIdx === -1) return null;
-    return { provider: model.slice(0, slashIdx), id: model.slice(slashIdx + 1), label: model };
+    return { provider: model.slice(0, slashIdx), id: model.slice(slashIdx + 1), label: model, contextWindow: '', maxOutput: '' };
   }
   const provider = model.provider || '';
   const id = model.id || model.model || model.name || '';
@@ -123,9 +135,9 @@ function normalizeAvailableModel(model) {
   };
 }
 
-function normalizedAvailableModels() {
-  const seen = new Set();
-  const out = [];
+function normalizedAvailableModels(): NormalizedModel[] {
+  const seen = new Set<string>();
+  const out: NormalizedModel[] = [];
   for (const item of availableModels || []) {
     const normalized = normalizeAvailableModel(item);
     if (!normalized) continue;
@@ -137,17 +149,17 @@ function normalizedAvailableModels() {
   return out;
 }
 
-function modelRef(model) {
+function modelRef(model: { provider?: string; id?: string }) {
   return `${model.provider}/${model.id}`;
 }
 
-function fuzzyCharsEquivalent(a, b) {
+function fuzzyCharsEquivalent(a: string, b: string) {
   if (a === b) return true;
   const groups = ['o0', 'i1l', 's5', 'b8', 'g9', 'z2'];
   return groups.some((group) => group.includes(a) && group.includes(b));
 }
 
-function fuzzyMatch(query, text) {
+function fuzzyMatch(query: string, text: string) {
   const q = String(query || '').toLowerCase();
   const t = String(text || '').toLowerCase();
   if (!q) return { score: 0 };
@@ -180,10 +192,10 @@ function fuzzyMatch(query, text) {
   return { score };
 }
 
-function fuzzyFilter(items, query, getText) {
+function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string) {
   const tokens = String(query || '').trim().split(/\s+/).filter(Boolean);
   if (!tokens.length) return items.map((item, index) => ({ item, score: -index }));
-  const scored = [];
+  const scored: { item: T; score: number }[] = [];
   items.forEach((item, index) => {
     const text = getText(item);
     let total = 0;
@@ -197,7 +209,7 @@ function fuzzyFilter(items, query, getText) {
   return scored.sort((a, b) => b.score - a.score);
 }
 
-function validThinkingSuffix(raw) {
+function validThinkingSuffix(raw: string) {
   const text = String(raw || '').trim();
   const colonIdx = text.lastIndexOf(':');
   if (colonIdx === -1) return '';
@@ -259,7 +271,7 @@ function renderModelPickerSuggestions() {
       model.images === true ? 'images' : '',
     ].filter(Boolean).join(' · ');
     item.innerHTML = `
-      <span class="model-item-name">${escapeHtml(model.id)}<span class="model-item-provider">${escapeHtml(model.provider)}</span></span>
+      <span class="model-item-name">${escapeHtml(model.id || '')}<span class="model-item-provider">${escapeHtml(model.provider || '')}</span></span>
       <span class="model-item-context">${escapeHtml(meta)}</span>
     `;
     item.addEventListener('mouseenter', () => {
@@ -271,7 +283,7 @@ function renderModelPickerSuggestions() {
   });
 }
 
-function selectModelSuggestion(index) {
+function selectModelSuggestion(index: number) {
   const model = modelPickerMatches[index];
   if (!model) return;
   const suffix = validThinkingSuffix(modelPickerInput.value);
@@ -315,7 +327,7 @@ function closeModelPicker() {
   setModelPickerMessage(MODEL_PICKER_HELP, false);
 }
 
-async function applyModelSpec(rawSpec) {
+async function applyModelSpec(rawSpec: string) {
   const raw = String(rawSpec || '').trim();
   // No-op when the user didn't actually edit anything. Avoids spurious
   // set_model/set_thinking_level RPCs and false validation errors on the
@@ -343,7 +355,7 @@ async function applyModelSpec(rawSpec) {
     const responseModel = (typeof data.model === 'object' && data.model ? data.model : data) as ModelRecord;
     const provider = responseModel.provider || parsed.provider;
     const id = responseModel.id || parsed.modelId;
-    currentModelId = (provider && id) ? { ...responseModel, provider, id } : (id || parsed.modelId);
+    currentModelId = (provider && id) ? { ...responseModel, provider, id } : (id || parsed.modelId || '');
     const responseContextWindow = responseModel.contextWindow || data.contextWindow;
     if (responseContextWindow) {
       setContextWindowSize(Number(responseContextWindow) || 0);
@@ -352,7 +364,7 @@ async function applyModelSpec(rawSpec) {
     if (parsed.thinking !== null) {
       const t = await rpcCommand({ type: 'set_thinking_level', level: parsed.thinking }, 'Setting thinking...');
       if (t && t.success) {
-        currentThinkingLevel = parsed.thinking;
+        currentThinkingLevel = parsed.thinking ?? 'off';
       } else {
         // Non-fatal: the model was already changed on the server.
         // Show the error but still consider the model update successful

@@ -50,18 +50,18 @@ test('resolveLiveSessionPath defaults to session.cwd when no path given', () => 
 test('resolveLiveSessionPath rejects paths outside the session cwd with 403', () => {
   assert.throws(
     () => resolveLiveSessionPath(session, OUTSIDE),
-    (err) => err.status === 403 && /outside the active session directory/.test(err.message),
+    (err: Error & { status: number }) => err.status === 403 && /outside the active session directory/.test(err.message),
   );
   // traversal escape
   assert.throws(
     () => resolveLiveSessionPath(session, path.join(CWD, '..', 'outside')),
-    (err) => err.status === 403,
+    (err: Error & { status: number }) => err.status === 403,
   );
 });
 
 test('resolveLiveSessionPath rejects with 404 when no session is provided', () => {
   assert.throws(
     () => resolveLiveSessionPath(null, CWD),
-    (err) => err.status === 404 && /Live session not found/.test(err.message),
+    (err: Error & { status: number }) => err.status === 404 && /Live session not found/.test(err.message),
   );
 });

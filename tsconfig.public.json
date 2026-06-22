@@ -6,8 +6,7 @@
     "rootDir": "src/public",
     "outDir": "public",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "strict": false,
-    "noImplicitAny": false,
+    "strict": true,
     "declaration": false,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true

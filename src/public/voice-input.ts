@@ -1,9 +1,37 @@
+type SpeechRecognitionInstance = EventTarget & {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+};
+
+type SpeechRecognitionResultAlt = { transcript: string };
+type SpeechRecognitionResult = {
+  isFinal: boolean;
+  length: number;
+  0: SpeechRecognitionResultAlt;
+};
+type SpeechRecognitionResultList = {
+  length: number;
+  [index: number]: SpeechRecognitionResult;
+};
+type SpeechRecognitionResultEvent = Event & {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+};
+type SpeechRecognitionErrorEvent = Event & { error: string };
+
 export function setupVoiceInput(micBtn: HTMLElement, messageInput: HTMLElement) {
-  let recognition = null;
+  let recognition: SpeechRecognitionInstance | null = null;
   let isRecording = false;
 
   if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      micBtn.style.display = 'none';
+      return;
+    }
     recognition = new SpeechRecognition();
     recognition.continuous = true;
     recognition.interimResults = true;
@@ -12,13 +40,14 @@ export function setupVoiceInput(micBtn: HTMLElement, messageInput: HTMLElement) 
     let finalTranscript = '';
     let interimTranscript = '';
 
-    recognition.addEventListener('result', (e) => {
+    recognition.addEventListener('result', (e: Event) => {
+      const ev = e as SpeechRecognitionResultEvent;
       interimTranscript = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalTranscript += e.results[i][0].transcript;
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        if (ev.results[i].isFinal) {
+          finalTranscript += ev.results[i][0].transcript;
         } else {
-          interimTranscript += e.results[i][0].transcript;
+          interimTranscript += ev.results[i][0].transcript;
         }
       }
       messageInput.value = finalTranscript + interimTranscript;
@@ -29,8 +58,9 @@ export function setupVoiceInput(micBtn: HTMLElement, messageInput: HTMLElement) 
       if (isRecording) stopRecording();
     });
 
-    recognition.addEventListener('error', (e) => {
-      console.error('[Voice] Error:', e.error);
+    recognition.addEventListener('error', (e: Event) => {
+      const ev = e as SpeechRecognitionErrorEvent;
+      console.error('[Voice] Error:', ev.error);
       stopRecording();
     });
 
@@ -43,6 +73,7 @@ export function setupVoiceInput(micBtn: HTMLElement, messageInput: HTMLElement) 
     });
 
     function startRecording() {
+      if (!recognition) return;
       finalTranscript = messageInput.value;
       interimTranscript = '';
       isRecording = true;
@@ -56,7 +87,7 @@ export function setupVoiceInput(micBtn: HTMLElement, messageInput: HTMLElement) 
       isRecording = false;
       micBtn.classList.remove('recording');
       micBtn.title = 'Voice input';
-      try { recognition.stop(); } catch {}
+      try { recognition?.stop(); } catch {}
       messageInput.value = finalTranscript;
       messageInput.dispatchEvent(new Event('input'));
       messageInput.focus();

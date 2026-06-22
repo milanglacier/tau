@@ -3,9 +3,35 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { WebSocket } = require('ws');
 
+import type { ChildProcess } from 'node:child_process';
 import type { JsonRecord, LiveClient, ModelIdentity, PendingCommand, RpcCommand, RpcResponse } from './types.js';
 import { expandHome } from './config.js';
 import { modelLabel, normalizeModel, parseModelSpecToModel } from './model-utils.js';
+
+type SpawnFn = (cmd: string, args: string[], opts: JsonRecord) => ChildProcess;
+type PiMessageContent = string | Array<{ type: string; text?: string }>;
+type PiMessage = { role?: string; content?: PiMessageContent; usage?: JsonRecord; model?: string };
+type PiRpcPayload = {
+  command?: string;
+  id?: string;
+  provider?: string;
+  model?: unknown;
+  thinkingLevel?: string;
+  level?: string;
+  sessionFile?: string;
+  sessionName?: string;
+  name?: string;
+  contextUsage?: JsonRecord;
+  tokens?: JsonRecord;
+  [key: string]: unknown;
+};
+type PiRpcMessage = PiRpcPayload & {
+  type?: string;
+  success?: boolean;
+  data?: PiRpcPayload;
+  result?: PiRpcPayload;
+  message?: PiMessage;
+};
 
 export function makeId() {
   return `tau_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
@@ -16,7 +42,7 @@ export class PiRpcSession {
   id: string;
   cwd: string;
   modelSpec: string;
-  child: ReturnType<typeof spawn> | null;
+  child: ChildProcess | null;
   pid: number | null;
   createdAt: string;
   lastActiveAt: string;
@@ -96,43 +122,44 @@ export class PiRpcSession {
     }
     const args = ['--mode', 'rpc'];
     if (this.modelSpec) args.push('--model', this.modelSpec);
-    const spawnFn = _spawnPiForTest || spawn;
-    this.child = spawnFn('pi', args, {
+    const spawnFn: SpawnFn = _spawnPiForTest || spawn;
+    const child = spawnFn('pi', args, {
       cwd: this.cwd,
       env: { ...process.env, TAU_DISABLED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    this.pid = this.child.pid || null;
+    this.child = child;
+    this.pid = child.pid || null;
 
-    this.child.stdout.setEncoding('utf8');
-    this.child.stdout.on('data', (chunk) => this.handleStdout(chunk));
-    this.child.stderr.setEncoding('utf8');
-    this.child.stderr.on('data', (chunk) => {
+    child.stdout!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => this.handleStdout(chunk));
+    child.stderr!.setEncoding('utf8');
+    child.stderr!.on('data', (chunk: string) => {
       for (const line of chunk.split(/\r?\n/).filter(Boolean)) console.error(`[Pi ${this.id}] ${line}`);
     });
-    this.child.on('error', (err) => this.handleExit(null, null, err));
-    this.child.on('exit', (code, signal) => this.handleExit(code, signal));
+    child.on('error', (err: Error) => this.handleExit(null, null, err));
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => this.handleExit(code, signal));
 
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       const cleanup = () => {
-        this.child.off('error', onError);
-        this.child.off('exit', onExit);
+        child.off('error', onError);
+        child.off('exit', onExit);
       };
-      const onError = (err) => {
+      const onError = (err: Error) => {
         if (settled) return;
         settled = true;
         cleanup();
         reject(err);
       };
-      const onExit = (code, signal) => {
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
         if (settled) return;
         settled = true;
         cleanup();
         reject(new Error(`Pi RPC process exited during startup (${signal || code})`));
       };
-      this.child.once('error', onError);
-      this.child.once('exit', onExit);
+      child.once('error', onError);
+      child.once('exit', onExit);
       setTimeout(() => {
         if (settled) return;
         settled = true;
@@ -149,7 +176,8 @@ export class PiRpcSession {
   }
 
   send(command: RpcCommand, opts: { timeoutMs?: number } = {}) {
-    if (!this.child || !this.child.stdin.writable || this.terminating) {
+    const child = this.child;
+    if (!child || !child.stdin!.writable || this.terminating) {
       return Promise.reject(new Error('Pi RPC session is not running'));
     }
     const id = command.id || `cmd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -163,7 +191,7 @@ export class PiRpcSession {
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, command: outbound.type });
       try {
-        this.child.stdin.write(JSON.stringify(outbound) + '\n', (err) => {
+        child.stdin!.write(JSON.stringify(outbound) + '\n', (err: Error | null | undefined) => {
           if (err) {
             clearTimeout(timer);
             this.pending.delete(id);
@@ -178,14 +206,14 @@ export class PiRpcSession {
     });
   }
 
-  handleStdout(chunk) {
+  handleStdout(chunk: string) {
     this.stdoutBuffer += chunk;
     const lines = this.stdoutBuffer.split(/\r?\n/);
     this.stdoutBuffer = lines.pop() || '';
     for (const line of lines) this.handleLine(line);
   }
 
-  handleLine(line) {
+  handleLine(line: string) {
     const trimmed = line.trim();
     if (!trimmed) return;
     let msg;
@@ -197,20 +225,22 @@ export class PiRpcSession {
     this.handleEvent(msg);
   }
 
-  handleResponse(resp) {
+  handleResponse(resp: PiRpcMessage) {
     const id = resp.id;
     if (id && this.pending.has(id)) {
       const pending = this.pending.get(id);
-      clearTimeout(pending.timer);
-      this.pending.delete(id);
-      pending.resolve(resp);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(id);
+        pending.resolve(resp);
+      }
     }
     this.updateStateFromResponse(resp);
     this.manager.broadcast({ type: 'event', sessionId: this.id, event: resp });
   }
 
-  updateStateFromResponse(resp) {
-    const data = resp.data || resp.result || resp;
+  updateStateFromResponse(resp: PiRpcMessage) {
+    const data: PiRpcPayload = resp.data || resp.result || resp;
     const command = resp.command || data.command;
     if (data.sessionFile) this.sessionFile = data.sessionFile;
     if (data.sessionName) this.sessionName = data.sessionName;
@@ -226,7 +256,7 @@ export class PiRpcSession {
     this.touch(true);
   }
 
-  handleEvent(event) {
+  handleEvent(event: PiRpcMessage) {
     this.touch(false);
     const type = event.type;
     if (type === 'agent_start' || type === 'turn_start') this.isStreaming = true;
@@ -251,7 +281,7 @@ export class PiRpcSession {
     this.manager.broadcastUpdated(this.id);
   }
 
-  trackMessage(message, eventType) {
+  trackMessage(message: PiMessage, eventType: string) {
     if (message.role === 'user' && eventType === 'message_start') {
       const text = this.messageText(message);
       if (text) this.userMessages.push(text.slice(0, 300));
@@ -262,7 +292,7 @@ export class PiRpcSession {
     }
   }
 
-  messageText(message) {
+  messageText(message: PiMessage) {
     if (typeof message.content === 'string') return message.content;
     if (Array.isArray(message.content)) return message.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n');
     return '';
@@ -282,7 +312,7 @@ export class PiRpcSession {
     this.manager.broadcast({ type: 'event', sessionId: this.id, event: { type: 'session_name', name: this.sessionName } });
   }
 
-  touch(broadcast) {
+  touch(broadcast: boolean) {
     this.lastActiveAt = new Date().toISOString();
     if (broadcast) this.manager.broadcastUpdated(this.id);
   }
@@ -367,5 +397,5 @@ export class LiveSessionManager {
 
 
 export const liveManager = new LiveSessionManager();
-let _spawnPiForTest = null;
-export function _setSpawnPiForTest(fn) { _spawnPiForTest = fn || null; }
+let _spawnPiForTest: SpawnFn | null = null;
+export function _setSpawnPiForTest(fn: SpawnFn | null | undefined) { _spawnPiForTest = fn || null; }

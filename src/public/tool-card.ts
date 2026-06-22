@@ -19,7 +19,7 @@ type ToolResultBlock = {
   [key: string]: unknown;
 };
 
-type ToolResult = {
+export type ToolResult = {
   content?: ToolResultBlock[];
   [key: string]: unknown;
 };
@@ -70,7 +70,7 @@ export class ToolCardRenderer {
     if (isEdit) {
       const diffEl = this.renderDiff(String(args.oldText || args.old_text || ''), String(args.newText || args.new_text || ''));
       const body = card.querySelector('.tool-card-body');
-      body.insertBefore(diffEl, body.firstChild);
+      if (body) body.insertBefore(diffEl, body.firstChild);
     }
 
     this.container.appendChild(card);
@@ -91,7 +91,7 @@ export class ToolCardRenderer {
     const statusElement = card.querySelector('.tool-status');
     if (statusElement) {
       statusElement.className = `tool-status ${toolExecution.status}`;
-      statusElement.textContent = toolExecution.status;
+      statusElement.textContent = toolExecution.status ?? null;
     }
 
     // Auto-expand when streaming

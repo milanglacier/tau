@@ -15,18 +15,34 @@ const PROJECTS_DIR = path.join(process.env.PI_CODING_AGENT_DIR, 'projects');
 process.env.TAU_PROJECTS_DIR = PROJECTS_DIR;
 
 const { server, computeUrls, liveManager, SESSIONS_DIR, _setSpawnPiForTest } = require('../bin/tau.js');
+import type { TestContext } from 'node:test';
 
 let base = '';
 
 const PROJ_DIR = path.join(SESSIONS_DIR, '--tmp--httpproj');
 const SESSION_FILE = path.join(PROJ_DIR, 's.jsonl');
 
-function writeSessionFile(lines) {
+function writeSessionFile(lines: Array<Record<string, unknown>>) {
   fs.mkdirSync(PROJ_DIR, { recursive: true });
-  fs.writeFileSync(SESSION_FILE, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  fs.writeFileSync(SESSION_FILE, lines.map((l: Record<string, unknown>) => JSON.stringify(l)).join('\n') + '\n');
 }
 
-function fakeSession(id) {
+interface FakeHttpSession {
+  id: string;
+  cwd: string;
+  model: string;
+  modelSpec: string;
+  thinkingLevel: string;
+  isStreaming: boolean;
+  sessionFile: string;
+  sessionName: string | null;
+  contextUsage: { tokens?: number; usage?: { input_tokens: number; output_tokens: number } } | null;
+  metadata: () => { id: string; cwd: string; model: string; isStreaming: boolean; sessionFile: string };
+  snapshot: () => { session: { id: string }; entries: unknown[]; model: string; isStreaming: boolean; sessionFile: string };
+  terminate: () => Promise<void>;
+}
+
+function fakeSession(id: string): FakeHttpSession {
   return {
     id,
     cwd: '/tmp/proj',
@@ -51,11 +67,11 @@ function makeFakeChild() {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   child.pid = 12345;
-  child.kill = (sig) => { child.killedSignal = sig; };
+  child.kill = (sig: string) => { child.killedSignal = sig; };
   return child;
 }
 
-before((t, done) => {
+before((t: TestContext, done: () => void) => {
   server.listen(0, '127.0.0.1', () => {
     const port = server.address().port;
     computeUrls(port);
@@ -64,7 +80,7 @@ before((t, done) => {
   });
 });
 
-after((t, done) => {
+after((t: TestContext, done: () => void) => {
   server.close(done);
 });
 
@@ -72,7 +88,7 @@ beforeEach(() => {
   liveManager.sessions.clear();
 });
 
-async function jsonBody(res) {
+async function jsonBody(res: Response) {
   return JSON.parse(await res.text());
 }
 
@@ -325,9 +341,9 @@ test('GET /api/projects lists project directories under the configured projects 
   const res = await fetch(`${base}/api/projects`);
   assert.equal(res.status, 200);
   const body = await jsonBody(res);
-  const names = body.projects.map((p) => p.name);
+  const names = body.projects.map((p: { name: string; active: boolean }) => p.name);
   assert.ok(names.includes('myproj'));
-  const proj = body.projects.find((p) => p.name === 'myproj');
+  const proj = body.projects.find((p: { name: string; active: boolean }) => p.name === 'myproj');
   assert.equal(proj.active, false);
 });
 
@@ -340,7 +356,7 @@ test('GET /api/files lists the directory for a live session', async () => {
   const res = await fetch(`${base}/api/files?sessionId=tau_1`);
   assert.equal(res.status, 200);
   const body = await jsonBody(res);
-  assert.ok(body.items.some((i) => i.name === 'a.txt'));
+  assert.ok(body.items.some((i: { name: string }) => i.name === 'a.txt'));
 });
 
 test('GET /api/file/preview streams a previewable image inside the session cwd', async () => {
@@ -397,7 +413,7 @@ test('POST /api/rpc with a malformed JSON body returns 400', async () => {
   assert.ok(body.error);
 });
 
-test('POST /api/live-sessions creates a live session and returns 200', async (t) => {
+test('POST /api/live-sessions creates a live session and returns 200', async (t: TestContext) => {
   const child = makeFakeChild();
   _setSpawnPiForTest(() => child);
   t.after(() => _setSpawnPiForTest(null));
@@ -417,7 +433,7 @@ test('POST /api/live-sessions creates a live session and returns 200', async (t)
   child.stdin.end();
 });
 
-test('POST /api/live-sessions returns 400 when the cwd does not exist', async (t) => {
+test('POST /api/live-sessions returns 400 when the cwd does not exist', async (t: TestContext) => {
   _setSpawnPiForTest(() => makeFakeChild());
   t.after(() => _setSpawnPiForTest(null));
   const res = await fetch(`${base}/api/live-sessions`, {
@@ -440,7 +456,7 @@ test('GET /api/files filters dotfiles and ignored directories from the listing',
   const res = await fetch(`${base}/api/files?sessionId=tau_1`);
   assert.equal(res.status, 200);
   const body = await jsonBody(res);
-  const names = body.items.map((i) => i.name);
+  const names = body.items.map((i: { name: string }) => i.name);
   assert.ok(names.includes('a.txt'));
   assert.ok(!names.includes('node_modules'));
   assert.ok(!names.includes('.hidden'));

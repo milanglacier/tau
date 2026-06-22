@@ -2,6 +2,9 @@ const { execFile } = require('node:child_process');
 
 import type { JsonRecord, ModelIdentity, ParsedModelSpec, StatusError } from './types.js';
 
+type ExecFileCallback = (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => void;
+type ExecFileFn = (file: string, args: string[], opts: JsonRecord, callback: ExecFileCallback) => void;
+
 export function modelLabel(model: ModelIdentity | string | null | undefined, fallback = '') {
   if (!model) return fallback || '';
   if (typeof model === 'string') return model;
@@ -81,12 +84,12 @@ export function parsePiListModels(output: string) {
 
 const MODEL_LIST_CACHE_MS = 5 * 60 * 1000;
 let modelListCache: { at: number; models: ModelIdentity[] } = { at: 0, models: [] };
-let _execFileForTest: typeof execFile | null = null;
+let _execFileForTest: ExecFileFn | null = null;
 
 export function execFileAsync(file: string, args: string[], opts: JsonRecord): Promise<{ stdout: string; stderr: string }> {
-  const runner = _execFileForTest || execFile;
+  const runner: ExecFileFn = _execFileForTest || execFile;
   return new Promise((resolve, reject) => {
-    runner(file, args, opts, (err, stdout, stderr) => {
+    runner(file, args, opts, (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => {
       if (err) {
         (err as StatusError).stderr = stderr;
         reject(err);
@@ -108,12 +111,12 @@ export async function getAvailableModels() {
     modelListCache = { at: now, models };
     return models;
   } catch (err) {
-    console.warn('[Tau] Failed to list Pi models:', err && err.message ? err.message : err);
+    console.warn('[Tau] Failed to list Pi models:', err instanceof Error ? err.message : err);
     modelListCache = { at: now, models: modelListCache.models || [] };
     return modelListCache.models;
   }
 }
 
 
-export function _setExecFileForTest(fn) { _execFileForTest = fn || null; modelListCache = { at: 0, models: [] }; }
+export function _setExecFileForTest(fn: ExecFileFn | null | undefined) { _execFileForTest = fn || null; modelListCache = { at: 0, models: [] }; }
 export function _clearModelListCacheForTest() { modelListCache = { at: 0, models: [] }; }

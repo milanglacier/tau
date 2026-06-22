@@ -16,14 +16,20 @@ const readline = require('node:readline');
 const { WebSocketServer, WebSocket } = require('ws');
 const QRCode = require('qrcode');
 
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Stats, Dirent } from 'node:fs';
+import type { Socket } from 'node:net';
+import type { WebSocket as WsType } from 'ws';
 import type { RpcCommand, RpcResponse, StatusError } from './types.js';
 import { ARGS, AUTH_CONFIGURED, HOST, MIME_TYPES, PI_AGENT_DIR, PORT, SESSIONS_DIR, STATIC_DIR, TAU_SETTINGS, expandHome, loadTauSettings, parseArgs, saveTauSetting } from './config.js';
 import { getAvailableModels, modelLabel, normalizeModel, parseModelSpecToModel, parsePiListModels, _clearModelListCacheForTest, _setExecFileForTest } from './model-utils.js';
 import { LiveSessionManager, PiRpcSession, liveManager, makeId, _setSpawnPiForTest } from './sessions.js';
 
+type TauWs = WsType & { isAlive?: boolean };
+
 let authEnabled = AUTH_CONFIGURED && TAU_SETTINGS.authEnabled !== false;
 
-function checkBasicAuth(req) {
+function checkBasicAuth(req: IncomingMessage) {
   if (!authEnabled) return true;
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Basic ')) return false;
@@ -33,20 +39,33 @@ function checkBasicAuth(req) {
   return decoded.slice(0, colon) === TAU_SETTINGS.user && decoded.slice(colon + 1) === TAU_SETTINGS.pass;
 }
 
-function sendAuthRequired(res) {
+function errorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+function errorStatus(e: unknown): number {
+  if (e && typeof e === 'object' && 'status' in e) {
+    const status = (e as { status?: unknown }).status;
+    if (typeof status === 'number' && status) return status;
+  }
+  return 400;
+}
+
+function sendAuthRequired(res: ServerResponse) {
   res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Tau"', 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'Unauthorized' }));
 }
 
-function json(res, status: number, data: unknown, extraHeaders: Record<string, string> = {}) {
+function json(res: ServerResponse, status: number, data: unknown, extraHeaders: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
   res.end(JSON.stringify(data));
 }
 
-function readBody(req): Promise<RpcCommand> {
+function readBody(req: IncomingMessage): Promise<RpcCommand> {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => {
+    req.on('data', (chunk: Buffer) => {
       body += chunk.toString();
       if (body.length > 20 * 1024 * 1024) reject(new Error('Request body too large'));
     });
@@ -116,7 +135,7 @@ function openUrl(url: string): Promise<void> {
   }
   const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
   return new Promise<void>((resolve, reject) => {
-    execFile(opener, [url], (err) => err ? reject(err) : resolve());
+    execFile(opener, [url], (err: NodeJS.ErrnoException | null) => err ? reject(err) : resolve());
   });
 }
 
@@ -166,7 +185,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     let resolvedFile = null;
     const targetFile = command.filePath || session?.sessionFile;
     if (targetFile) {
-      try { resolvedFile = appendSessionName(targetFile, name); } catch (e) { return error(e.message); }
+      try { resolvedFile = appendSessionName(targetFile, name); } catch (e) { return error(errorMessage(e)); }
     }
     const matchingLive = resolvedFile
       ? Array.from(liveManager.sessions.values()).find((s) => s.sessionFile && path.resolve(s.sessionFile) === resolvedFile)
@@ -186,7 +205,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
       const args = ['--export', sf];
       if (command.outputPath) args.push(resolveExportOutputPath(command.outputPath, sf));
       const output = await new Promise<string>((resolve, reject) => {
-        execFile('pi', args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err, stdout, stderr) => {
+        execFile('pi', args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => {
           if (err) reject(new Error(stderr || err.message)); else resolve(stdout);
         });
       });
@@ -194,7 +213,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
       result = path.resolve(expandHome(result));
       if (!fs.existsSync(result)) result = sf.replace(/\.jsonl$/, '.html');
       return success({ path: result });
-    } catch (e) { return error(e.message); }
+    } catch (e) { return error(errorMessage(e)); }
   }
 
   if (!session) return error('No active Tau session. Create or select an in-page Tau tab first.');
@@ -214,7 +233,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   if (cmd === 'set_auto_compaction') return success({ enabled: !!command.enabled });
 
   const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'extension_ui_response']);
-  if (!native.has(cmd)) return error(`Unknown command: ${cmd}`);
+  if (!native.has(cmd ?? '')) return error(`Unknown command: ${cmd}`);
 
   // `set_thinking_level` is forwarded to pi but pi's response carries no
   // level/thinkingLevel field, so updateStateFromResponse would never update
@@ -222,7 +241,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   // stale level to all clients (reverting a client's just-set optimistic
   // level). Record the level optimistically here and restore on pi failure.
   const isSetThinkingLevel = cmd === 'set_thinking_level';
-  let prevThinkingLevel = null;
+  let prevThinkingLevel: string | null = null;
   if (isSetThinkingLevel) {
     prevThinkingLevel = session.thinkingLevel;
     if (command.level) session.thinkingLevel = command.level;
@@ -230,7 +249,7 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
 
   try {
     const resp = await session.send(command, { timeoutMs: cmd === 'prompt' ? 10000 : 60000 });
-    if (isSetThinkingLevel && resp.success === false) {
+    if (isSetThinkingLevel && resp.success === false && prevThinkingLevel !== null) {
       session.thinkingLevel = prevThinkingLevel;
     }
     // Extension-driven model/thinking changes (e.g. the pi-session-model
@@ -244,16 +263,16 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     }
     return { ...resp, success: resp.success !== false };
   } catch (e) {
-    if (isSetThinkingLevel) session.thinkingLevel = prevThinkingLevel;
+    if (isSetThinkingLevel && prevThinkingLevel !== null) session.thinkingLevel = prevThinkingLevel;
     // Some commands are ack-less fire-and-forget in practice; keep UX moving
     // only when the write succeeded and the child simply did not acknowledge.
-    const isAckTimeout = /^RPC command timed out:/.test(e.message || '');
+    const isAckTimeout = /^RPC command timed out:/.test(errorMessage(e));
     if (isAckTimeout && (cmd === 'prompt' || cmd === 'abort' || cmd === 'extension_ui_response')) return success();
-    return error(e.message);
+    return error(errorMessage(e));
   }
 }
 
-function serveStaticFile(req, res) {
+function serveStaticFile(req: IncomingMessage, res: ServerResponse) {
   let urlPath = req.url || '/';
   if (authEnabled && !urlPath.startsWith('/api/health') && !checkBasicAuth(req)) return sendAuthRequired(res);
   if (urlPath.startsWith('/api/')) return handleApiRoute(req, res, urlPath);
@@ -270,14 +289,14 @@ function serveStaticFile(req, res) {
   const staticRoot = path.resolve(STATIC_DIR);
   const filePath = path.resolve(path.join(staticRoot, decodedPath));
   if (filePath !== staticRoot && !filePath.startsWith(staticRoot + path.sep)) { res.writeHead(403); res.end('Forbidden'); return; }
-  fs.stat(filePath, (err, stats) => {
+  fs.stat(filePath, (err: NodeJS.ErrnoException | null, stats: Stats) => {
     if (err || !stats.isFile()) { res.writeHead(404); res.end('Not Found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': (MIME_TYPES as Record<string, string>)[path.extname(filePath).toLowerCase()] || 'application/octet-stream' });
     fs.createReadStream(filePath).pipe(res);
   });
 }
 
-function isAllowedApiOrigin(req) {
+function isAllowedApiOrigin(req: IncomingMessage) {
   const origin = req.headers.origin;
   if (!origin) return true;
   try {
@@ -287,7 +306,7 @@ function isAllowedApiOrigin(req) {
   }
 }
 
-function setCorsForAllowedOrigin(req, res) {
+function setCorsForAllowedOrigin(req: IncomingMessage, res: ServerResponse) {
   const origin = req.headers.origin;
   if (!origin) return true;
   if (!isAllowedApiOrigin(req)) return false;
@@ -298,7 +317,7 @@ function setCorsForAllowedOrigin(req, res) {
   return true;
 }
 
-function handleApiRoute(req, res, urlPath) {
+function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: string) {
   const originAllowed = setCorsForAllowedOrigin(req, res);
   if (req.method === 'OPTIONS') {
     if (!originAllowed) return json(res, 403, { error: 'Origin not allowed' });
@@ -320,8 +339,8 @@ function handleApiRoute(req, res, urlPath) {
       try {
         const session = await liveManager.create({ cwd: body.cwd, model: body.model || '' });
         json(res, 200, { session: session.metadata() });
-      } catch (e) { json(res, 400, { error: e.message }); }
-    }).catch((e) => json(res, 400, { error: e.message }));
+      } catch (e) { json(res, 400, { error: errorMessage(e) }); }
+    }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
   const liveMatch = cleanPath.match(/^\/api\/live-sessions\/([^/]+)(?:\/snapshot)?$/);
@@ -351,7 +370,7 @@ function handleApiRoute(req, res, urlPath) {
     try {
       const dirPath = resolveLiveSessionPath(session, explicitPath || session.cwd);
       return serveFileList(res, dirPath);
-    } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
   }
   if (cleanPath === '/api/file/preview' && req.method === 'GET') {
     const sessionId = parsed.searchParams.get('sessionId');
@@ -361,7 +380,7 @@ function handleApiRoute(req, res, urlPath) {
     try {
       const filePath = resolveLiveSessionPath(session, parsed.searchParams.get('path'));
       return serveFilePreview(res, filePath);
-    } catch (e) { return json(res, e.status || 400, { error: e.message }); }
+    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
   }
   if (cleanPath === '/api/open' && req.method === 'POST') {
     readBody(req).then((body) => {
@@ -369,15 +388,15 @@ function handleApiRoute(req, res, urlPath) {
         const filePath = resolveOpenPath(body);
         return openNative(filePath)
           .then(() => json(res, 200, { ok: true }))
-          .catch((e) => json(res, 500, { error: e.message }));
+          .catch((e) => json(res, 500, { error: errorMessage(e) }));
       } catch (e) {
-        return json(res, e.status || 400, { error: e.message });
+        return json(res, errorStatus(e), { error: errorMessage(e) });
       }
-    }).catch((e) => json(res, 400, { error: e.message }));
+    }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
   if (cleanPath === '/api/rpc' && req.method === 'POST') {
-    readBody(req).then((body) => handleRpcCommand(body).then((resp) => json(res, 200, resp))).catch((e) => json(res, 400, { error: e.message }));
+    readBody(req).then((body) => handleRpcCommand(body).then((resp) => json(res, 200, resp))).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
   if (cleanPath === '/api/sessions/switch' && req.method === 'POST') return json(res, 200, { success: true, standalone: true, note: 'Historical sessions are read-only in standalone Tau' });
@@ -387,7 +406,7 @@ function handleApiRoute(req, res, urlPath) {
       const sessionFile = resolveSessionFile(body.filePath);
       fs.unlinkSync(sessionFile);
       json(res, 200, { success: true });
-    }).catch((e) => json(res, 400, { error: e.message }));
+    }).catch((e) => json(res, 400, { error: errorMessage(e) }));
     return;
   }
   const sessionMatch = cleanPath.match(/^\/api\/sessions\/([^/]+)\/([^/]+)$/);
@@ -396,21 +415,21 @@ function handleApiRoute(req, res, urlPath) {
   json(res, 404, { error: 'Not found' });
 }
 
-function serveQr(res) {
+function serveQr(res: ServerResponse) {
   if (!mirrorUrl) return json(res, 503, { error: 'Server not ready' });
   Promise.all([QRCode.toDataURL(mirrorUrl, { width: 256, margin: 2 }), tailscaleUrl ? QRCode.toDataURL(tailscaleUrl, { width: 256, margin: 2 }) : null])
     .then(([lan, ts]) => {
       const tsSection = tailscaleUrl && ts ? `<p style="margin-top:24px;color:rgba(255,255,255,0.3);font-size:11px">TAILSCALE</p><img src="${ts}" width="256" height="256" alt="Tailscale QR"><a href="${tailscaleUrl}">${tailscaleUrl}</a>` : '';
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width"><title>Tau — Connect</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#131316;color:#fff;font-family:-apple-system,sans-serif}img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-top:8px}</style></head><body><p style="color:rgba(255,255,255,0.3);font-size:11px">LAN</p><img src="${lan}" width="256" height="256" alt="QR Code"><a href="${mirrorUrl}">${mirrorUrl}</a>${tsSection}<p style="margin-top:16px">Scan to open Tau on your phone</p></body></html>`);
-    }).catch((e) => json(res, 500, { error: e.message }));
+    }).catch((e) => json(res, 500, { error: errorMessage(e) }));
 }
 
 function liveFilesSet() {
   return new Set(liveManager.list().map((s) => s.sessionFile).filter(Boolean));
 }
 
-function serveProjectsList(res) {
+function serveProjectsList(res: ServerResponse) {
   const projectsDir = TAU_SETTINGS.projectsDir;
   if (!projectsDir || !fs.existsSync(projectsDir)) return json(res, 200, { projects: [], ...(projectsDir ? { error: 'Directory not found' } : {}) });
   try {
@@ -420,7 +439,7 @@ function serveProjectsList(res) {
         if (!dir.isDirectory()) continue;
         const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
         if (!decodedPath.startsWith(projectsDir)) continue;
-        const files = fs.readdirSync(path.join(SESSIONS_DIR, dir.name)).filter((f) => f.endsWith('.jsonl'));
+        const files = fs.readdirSync(path.join(SESSIONS_DIR, dir.name)).filter((f: string) => f.endsWith('.jsonl'));
         let lastActive = 0;
         for (const f of files) { try { lastActive = Math.max(lastActive, fs.statSync(path.join(SESSIONS_DIR, dir.name, f)).mtimeMs); } catch {} }
         sessionInfo.set(decodedPath, { count: files.length, lastActive });
@@ -428,17 +447,17 @@ function serveProjectsList(res) {
     }
     const liveCwds = new Set(liveManager.list().map((s) => s.cwd));
     const projects = fs.readdirSync(projectsDir, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
-      .map((e) => {
+      .filter((e: Dirent) => e.isDirectory() && !e.name.startsWith('.'))
+      .map((e: Dirent) => {
         const fullPath = path.join(projectsDir, e.name);
         const info = sessionInfo.get(fullPath) || { count: 0, lastActive: 0 };
         return { name: e.name, path: fullPath, sessionCount: info.count, lastActive: info.lastActive || null, active: liveCwds.has(fullPath) };
       });
     json(res, 200, { projects });
-  } catch (e) { json(res, 500, { error: e.message }); }
+  } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
-async function serveSessionsList(res) {
+async function serveSessionsList(res: ServerResponse) {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) return json(res, 200, { projects: [] });
     const projects = [];
@@ -448,7 +467,7 @@ async function serveSessionsList(res) {
       const projectDir = path.join(SESSIONS_DIR, dir.name);
       const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
       const sessions = [];
-      for (const file of fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'))) {
+      for (const file of fs.readdirSync(projectDir).filter((f: string) => f.endsWith('.jsonl'))) {
         try {
           const filePath = path.join(projectDir, file);
           const parsed = await parseSessionFile(filePath);
@@ -460,10 +479,10 @@ async function serveSessionsList(res) {
     }
     projects.sort((a, b) => (b.sessions[0]?.mtime || 0) - (a.sessions[0]?.mtime || 0));
     json(res, 200, { projects });
-  } catch (e) { json(res, 500, { error: e.message }); }
+  } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
-async function parseSessionFile(filePath) {
+async function parseSessionFile(filePath: string) {
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let header = null, firstMessage = null, sessionName = null, userMessageCount = 0, lineCount = 0;
@@ -488,23 +507,23 @@ async function parseSessionFile(filePath) {
   return { id: header.id, timestamp: header.timestamp || '', name: sessionName, firstMessage, cwd: header.cwd || null };
 }
 
-function serveSessionFile(res, dirName, file) {
+function serveSessionFile(res: ServerResponse, dirName: string, file: string) {
   const filePath = path.join(SESSIONS_DIR, dirName, file);
   if (!fs.existsSync(filePath)) return json(res, 404, { error: 'Session not found' });
-  const entries = [];
+  const entries: unknown[] = [];
   const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
   let buffer = '';
-  stream.on('data', (chunk) => {
+  stream.on('data', (chunk: string) => {
     buffer += chunk;
     const lines = buffer.split('\n'); buffer = lines.pop() || '';
     for (const line of lines) if (line.trim()) { try { entries.push(JSON.parse(line)); } catch {} }
   });
   stream.on('end', () => { if (buffer.trim()) { try { entries.push(JSON.parse(buffer)); } catch {} } json(res, 200, { entries }); });
-  stream.on('error', (e) => json(res, 500, { error: e.message }));
+  stream.on('error', (e: Error) => json(res, 500, { error: e.message }));
 }
 
 const IGNORED_NAMES = new Set(['node_modules', '.git', '__pycache__', '.DS_Store', '.Trash', '.next', '.nuxt', 'dist', 'build', '.cache', '.turbo', 'venv', '.venv', 'env', '.env.local', '.pi', 'coverage', '.nyc_output', '.parcel-cache']);
-function serveFileList(res, dirPath) {
+function serveFileList(res: ServerResponse, dirPath: string) {
   try {
     dirPath = path.resolve(expandHome(dirPath));
     if (!fs.existsSync(dirPath) || !fs.statSync(dirPath).isDirectory()) return json(res, 400, { error: 'Not a directory' });
@@ -520,22 +539,22 @@ function serveFileList(res, dirPath) {
     }
     items.sort((a, b) => a.isDirectory !== b.isDirectory ? (a.isDirectory ? -1 : 1) : a.name.localeCompare(b.name));
     json(res, 200, { path: dirPath, items });
-  } catch (e) { json(res, 500, { error: e.message }); }
+  } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
-function serveFilePreview(res, filePath) {
+function serveFilePreview(res: ServerResponse, filePath: string) {
   if (!filePath) return json(res, 400, { error: 'path required' });
-  const mimes = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon' };
+  const mimes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon' };
   const mime = mimes[path.extname(filePath).toLowerCase().slice(1)];
   if (!mime) return json(res, 415, { error: 'Not a previewable image' });
   try {
     if (!fs.statSync(filePath).isFile()) throw new Error('Not a file');
     res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'max-age=60' });
     fs.createReadStream(filePath).pipe(res);
-  } catch (e) { json(res, 404, { error: e.message }); }
+  } catch (e) { json(res, 404, { error: errorMessage(e) }); }
 }
 
-function resolveExportedSessionPath(filePath) {
+function resolveExportedSessionPath(filePath: string) {
   const resolved = path.resolve(expandHome(filePath || ''));
   const root = path.resolve(SESSIONS_DIR);
   if (!resolved.startsWith(root + path.sep) || path.extname(resolved).toLowerCase() !== '.html') {
@@ -551,7 +570,7 @@ function resolveExportedSessionPath(filePath) {
   return resolved;
 }
 
-function resolveExportOutputPath(outputPath, sessionFile) {
+function resolveExportOutputPath(outputPath: string, sessionFile: string) {
   if (!outputPath || typeof outputPath !== 'string') throw new Error('outputPath required');
   const sessionDir = path.dirname(path.resolve(sessionFile));
   const sessionDirReal = fs.realpathSync(sessionDir);
@@ -577,7 +596,7 @@ function resolveExportOutputPath(outputPath, sessionFile) {
   return resolved;
 }
 
-function resolveOpenPath(body) {
+function resolveOpenPath(body: RpcCommand) {
   if (!body?.filePath || typeof body.filePath !== 'string') throw new Error('filePath required');
   if (body.sessionId) {
     const session = liveManager.get(body.sessionId);
@@ -592,7 +611,7 @@ function resolveOpenPath(body) {
   return resolveExportedSessionPath(body.filePath);
 }
 
-async function openNative(fp) {
+async function openNative(fp: string) {
   if (!fp || typeof fp !== 'string') throw new Error('filePath required');
   const resolved = path.resolve(expandHome(fp));
   if (!fs.existsSync(resolved)) throw new Error('File not found');
@@ -605,7 +624,7 @@ async function openNative(fp) {
   }
 }
 
-async function serveSearch(res, query) {
+async function serveSearch(res: ServerResponse, query: string) {
   try {
     if (!query || query.length < 2 || !fs.existsSync(SESSIONS_DIR)) return json(res, 200, { results: [] });
     const q = query.toLowerCase();
@@ -614,7 +633,7 @@ async function serveSearch(res, query) {
       if (!dir.isDirectory() || results.length >= 30) continue;
       const projectDir = path.join(SESSIONS_DIR, dir.name);
       const decodedPath = dir.name.replace(/^--/, '/').replace(/--$/, '').replace(/-/g, '/');
-      for (const file of fs.readdirSync(projectDir).filter((f) => f.endsWith('.jsonl'))) {
+      for (const file of fs.readdirSync(projectDir).filter((f: string) => f.endsWith('.jsonl'))) {
         if (results.length >= 30) break;
         const filePath = path.join(projectDir, file);
         const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
@@ -644,10 +663,10 @@ async function serveSearch(res, query) {
       }
     }
     json(res, 200, { results });
-  } catch (e) { json(res, 500, { error: e.message }); }
+  } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
-function computeUrls(port) {
+function computeUrls(port: number) {
   const isLoopback = HOST === '127.0.0.1' || HOST === '::1' || HOST === 'localhost';
   let localIp = 'localhost';
   let tailscaleIp = '';
@@ -672,7 +691,7 @@ function computeUrls(port) {
 const server = http.createServer(serveStaticFile);
 const wss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', (request, socket, head) => {
+server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
   if (!isAllowedApiOrigin(request)) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
@@ -683,22 +702,22 @@ server.on('upgrade', (request, socket, head) => {
     socket.destroy();
     return;
   }
-  if (request.url === '/ws') wss.handleUpgrade(request, socket, head, (ws) => wss.emit('connection', ws, request));
+  if (request.url === '/ws') wss.handleUpgrade(request, socket, head, (ws: TauWs) => wss.emit('connection', ws, request));
   else socket.destroy();
 });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws: TauWs) => {
   liveManager.addClient(ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
   ws.send(JSON.stringify({ type: 'state', mode: 'standalone', liveSessions: liveManager.list() }));
-  ws.on('message', async (data) => {
+  ws.on('message', async (data: Buffer) => {
     try {
       const command = JSON.parse(data.toString());
       const resp = await handleRpcCommand(command);
       if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(resp));
     } catch (e) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: e.message }));
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'error', message: errorMessage(e) }));
     }
   });
   ws.on('close', () => liveManager.removeClient(ws));
@@ -714,8 +733,8 @@ setInterval(() => {
   }
 }, 20000).unref();
 
-function listen(port, attemptsLeft = 10) {
-  server.once('error', (err) => {
+function listen(port: number, attemptsLeft = 10) {
+  server.once('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
       console.log(`[Tau] Port ${port} in use, trying ${port + 1}...`);
       server.removeAllListeners('error');
@@ -734,7 +753,7 @@ function listen(port, attemptsLeft = 10) {
 }
 
 let shuttingDown = false;
-async function shutdown(signal) {
+async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`\n[Tau] Shutting down (${signal}); terminating ${liveManager.sessions.size} Pi session(s)...`);
@@ -757,7 +776,7 @@ function startCli() {
 }
 
 // Test-only helper to reset module-level auth state between cases.
-function _setAuthForTest(enabled) { authEnabled = !!enabled; }
+function _setAuthForTest(enabled: boolean) { authEnabled = !!enabled; }
 
 // Test-only hook to substitute the `pi` spawn so LiveSessionManager.create()
 // can be exercised without launching a real Pi process.

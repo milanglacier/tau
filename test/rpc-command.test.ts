@@ -22,6 +22,24 @@ const {
   SESSIONS_DIR,
 } = require('../bin/tau.js');
 
+interface RpcTestSession {
+  id: string;
+  cwd: string;
+  model: string;
+  modelSpec: string;
+  thinkingLevel: string;
+  isStreaming: boolean;
+  sessionFile: string;
+  sessionName: string | null;
+  titleSet: boolean;
+  entries: Array<Record<string, unknown>>;
+  contextUsage: { tokens?: number; usage?: { input_tokens: number; output_tokens: number } } | null;
+  metadata: () => Record<string, unknown>;
+  snapshot: () => Record<string, unknown>;
+  send: (cmd: { id?: string; type?: string; [k: string]: unknown }) =>
+    Promise<{ type: string; id?: string; success: boolean; data: Record<string, unknown>; error?: string }>;
+}
+
 const PROJ = path.join(SESSIONS_DIR, '--tmp--proj');
 const SESSION_FILE = path.join(PROJ, 's.jsonl');
 
@@ -39,8 +57,8 @@ beforeEach(() => {
   _setExecFileForTest(null);
 });
 
-function injectSession(overrides = {}) {
-  const session = {
+function injectSession(overrides: Partial<RpcTestSession> = {}): RpcTestSession {
+  const session: RpcTestSession = {
     id: 'tau_test',
     cwd: '/tmp/proj',
     model: 'openai/gpt-5.5',
@@ -106,7 +124,7 @@ fireworks     accounts/fireworks/models/deepseek-v4-flash         1M       384K 
 });
 
 test('get_available_models returns parsed pi model list', async () => {
-  _setExecFileForTest((file, args, opts, cb) => {
+  _setExecFileForTest((file: string, args: string[], opts: object, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
     assert.equal(file, 'pi');
     assert.deepEqual(args, ['--list-models']);
     cb(null, `provider      model                                               context  max-out  thinking  images

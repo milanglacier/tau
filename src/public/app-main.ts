@@ -5,8 +5,8 @@
 import { WebSocketClient } from './websocket-client.js';
 import { StateManager } from './state.js';
 import { MessageRenderer } from './message-renderer.js';
-import { ToolCardRenderer, type ToolExecution } from './tool-card.js';
-import { DialogHandler } from './dialogs.js';
+import { ToolCardRenderer, type ToolExecution, type ToolResult } from './tool-card.js';
+import { DialogHandler, type DialogRequest } from './dialogs.js';
 import { SessionSidebar, type SidebarProject, type SidebarSession } from './session-sidebar.js';
 import { themes, applyTheme, getCurrentTheme } from './themes.js';
 import { FileBrowser, getFileIcon } from './file-browser.js';
@@ -15,29 +15,47 @@ import { setupModelPicker } from './model-picker.js';
 import { setupVoiceInput } from './voice-input.js';
 import { setupCommandPalette } from './command-palette.js';
 
-import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
+import type { AppEvent, AppMessage, ExtensionUIRequest, LiveInstance, LiveSession, MessageContentBlock, ModelRecord, PendingFilePath, PendingImage, QueuedCommand, RpcCommand, UsageRecord } from './app-types.js';
+
+type SessionHistoryEntry = { type?: string; message?: AppMessage };
+
+type MirrorSyncData = {
+  sessionId?: string;
+  sessionFile?: string | null;
+  session?: { sessionFile?: string | null };
+  isStreaming?: boolean;
+  model?: ModelRecord | null;
+  thinkingLevel?: string;
+  entries?: SessionHistoryEntry[];
+};
+
+type RpcEventDetail = { sessionId?: string; event?: AppEvent };
 
 // Initialize components
 const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
 const wsClient = new WebSocketClient(wsUrl);
 const state = new StateManager();
-const messageRenderer = new MessageRenderer(document.getElementById('messages'));
-const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages'));
-const dialogHandler = new DialogHandler(document.getElementById('dialog-container'), wsClient, () => activeLiveSessionId);
+// All element lookups below query the app's static index.html shell, which is
+// present before this module runs (the script is a deferred module at the end
+// of <body>). A missing element means the page is structurally broken, so we
+// assert non-null at the query site rather than guarding every usage.
+const messageRenderer = new MessageRenderer(document.getElementById('messages')!);
+const toolCardRenderer = new ToolCardRenderer(document.getElementById('messages')!);
+const dialogHandler = new DialogHandler(document.getElementById('dialog-container')!, wsClient, () => activeLiveSessionId);
 
 // Session sidebar
 const sidebar = new SessionSidebar(
-  document.getElementById('session-list'),
+  document.getElementById('session-list')!,
   handleSessionSelect
 );
 
 // UI elements
-const messageInput = document.getElementById('message-input');
-const chatForm = document.getElementById('chat-form');
-const sendBtn = document.getElementById('send-btn');
-const abortBtn = document.getElementById('abort-btn');
-const statusIndicator = document.getElementById('status-indicator');
-const statusText = document.getElementById('status-text');
+const messageInput = document.getElementById('message-input')!;
+const chatForm = document.getElementById('chat-form')!;
+const sendBtn = document.getElementById('send-btn')!;
+const abortBtn = document.getElementById('abort-btn')!;
+const statusIndicator = document.getElementById('status-indicator')!;
+const statusText = document.getElementById('status-text')!;
 // Tracks the pending timer that restores statusText after a transient
 // status message (rpcCommand success/error). Any new status message must
 // clear this so a stale restore cannot overwrite a later, longer-lived
@@ -69,7 +87,7 @@ function setStatusMessage(text: string, restoreText: string | null = null, resto
     statusFlashTimer = null;
     restoreStatusIndicator();
   }
-  clearTimeout(statusRestoreTimer);
+  clearTimeout(statusRestoreTimer ?? undefined);
   statusText.textContent = text;
   if (restoreText !== null) {
     statusRestoreTimer = setTimeout(() => {
@@ -80,18 +98,18 @@ function setStatusMessage(text: string, restoreText: string | null = null, resto
 }
 // Turn the status indicator red and show an error message; after `ms`,
 // restore the indicator to the real connection state and reset the text.
-function flashStatusError(msg, ms = 3000) {
+function flashStatusError(msg: string, ms = 3000) {
   // Reset the class atomically so no stale connected/disconnected/streaming
   // class lingers alongside `error` (matches updateConnectionStatus' style).
   statusIndicator.className = 'status-indicator error';
   // Cancel any pending status-text restore (e.g. rpcCommand's 'Done' ->
   // 'Connected' timer from an earlier successful step in the same flow) so it
   // cannot overwrite this error message while the red dot persists.
-  clearTimeout(statusRestoreTimer);
+  clearTimeout(statusRestoreTimer ?? undefined);
   // Cancel any prior flash restore so overlapping flashes (a second
   // model-save failure within 3s) cannot leak a stray restore that
   // would reset the dot before this flash's own restore fires.
-  clearTimeout(statusFlashTimer);
+  clearTimeout(statusFlashTimer ?? undefined);
   statusText.textContent = msg;
   // Schedule the dot+text restore on the dedicated statusFlashTimer so a
   // later setStatusMessage (e.g. the user clicking the thinking-level cycle
@@ -108,21 +126,21 @@ function flashStatusError(msg, ms = 3000) {
   }, ms);
 }
 
-const sidebarEl = document.getElementById('sidebar');
-const sidebarToggle = document.getElementById('sidebar-toggle');
-const sidebarOverlay = document.getElementById('sidebar-overlay');
+const sidebarEl = document.getElementById('sidebar')!;
+const sidebarToggle = document.getElementById('sidebar-toggle')!;
+const sidebarOverlay = document.getElementById('sidebar-overlay')!;
 
-const refreshSessionsBtn = document.getElementById('refresh-sessions-btn');
-const sessionSearchInput = document.getElementById('session-search-input');
-const typingIndicator = document.getElementById('typing-indicator');
+const refreshSessionsBtn = document.getElementById('refresh-sessions-btn')!;
+const sessionSearchInput = document.getElementById('session-search-input')!;
+const typingIndicator = document.getElementById('typing-indicator')!;
 
-const sessionCostEl = document.getElementById('session-cost');
-const tokenUsageEl = document.getElementById('token-usage');
-const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
-const scrollBottomBadge = document.getElementById('scroll-bottom-badge');
-const messagesContainer = document.getElementById('messages');
+const sessionCostEl = document.getElementById('session-cost')!;
+const tokenUsageEl = document.getElementById('token-usage')!;
+const scrollBottomBtn = document.getElementById('scroll-bottom-btn')!;
+const scrollBottomBadge = document.getElementById('scroll-bottom-badge')!;
+const messagesContainer = document.getElementById('messages')!;
 const launcherPanel = setupLauncherPanel({
-  launcherEl: document.getElementById('launcher'),
+  launcherEl: document.getElementById('launcher')!,
   messagesContainer,
   async createSession(projectPath) {
     try {
@@ -166,12 +184,12 @@ let pendingExtensionUIRequests: ExtensionUIRequest[] = []; // background session
 dialogHandler.onIdle = () => processQueuedExtensionUIRequest();
 
 // File browser
-const fileSidebar = document.getElementById('file-sidebar');
-const fileSidebarToggle = document.getElementById('file-sidebar-toggle');
-const fileSidebarClose = document.getElementById('file-sidebar-close');
-const fileSidebarUp = document.getElementById('file-sidebar-up');
-const fileList = document.getElementById('file-list');
-const fileSidebarPath = document.getElementById('file-sidebar-path');
+const fileSidebar = document.getElementById('file-sidebar')!;
+const fileSidebarToggle = document.getElementById('file-sidebar-toggle')!;
+const fileSidebarClose = document.getElementById('file-sidebar-close')!;
+const fileSidebarUp = document.getElementById('file-sidebar-up')!;
+const fileList = document.getElementById('file-list')!;
+const fileSidebarPath = document.getElementById('file-sidebar-path')!;
 const fileBrowser = new FileBrowser(fileList, fileSidebarPath, messageInput, (filePath) => {
   const name = filePath.split(/[/\\]/).pop() || filePath;
   const ext = name.split('.').pop()?.toLowerCase() || '';
@@ -198,12 +216,12 @@ fileSidebarUp.addEventListener('click', () => {
 });
 
 fetch('/api/health').then(r => r.json()).then(data => {
-  const names = { win32: 'Explorer', darwin: 'Finder', linux: 'file manager' };
+  const names: Record<string, string> = { win32: 'Explorer', darwin: 'Finder', linux: 'file manager' };
   const name = names[data.platform] || 'file manager';
-  document.getElementById('file-sidebar-finder').title = `Open in ${name}`;
+  document.getElementById('file-sidebar-finder')!.title = `Open in ${name}`;
 }).catch(() => {});
 
-document.getElementById('file-sidebar-finder').addEventListener('click', () => {
+document.getElementById('file-sidebar-finder')!.addEventListener('click', () => {
   const sessionId = viewingActiveSession && activeLiveSessionId ? activeLiveSessionId : null;
   if (fileBrowser.currentPath && sessionId) {
     fetch('/api/open', {
@@ -303,9 +321,9 @@ wsClient.addEventListener('reconnectFailed', () => {
   messageRenderer.renderError('Connection lost. Please refresh the page.');
 });
 
-wsClient.addEventListener('rpcEvent', (e) => {
-  const detail = e.detail || {};
-  const event = detail.event || detail;
+wsClient.addEventListener('rpcEvent', (e: Event) => {
+  const detail = (e as CustomEvent<RpcEventDetail>).detail || {};
+  const event = (detail.event || detail) as AppEvent;
   const sessionId = detail.sessionId;
   if (sessionId) {
     const session = liveSessions.find(s => s.id === sessionId);
@@ -314,7 +332,7 @@ wsClient.addEventListener('rpcEvent', (e) => {
       if (event.type === 'agent_start' || event.type === 'turn_start') session.isStreaming = true;
       if (event.type === 'agent_end' || event.type === 'turn_end') session.isStreaming = false;
       if (event.type === 'session_name' && event.name) session.sessionName = event.name;
-      if (event.message?.usage) session.contextUsage = { ...(session.contextUsage || {}), usage: event.message.usage };
+      if ((event.message as AppMessage)?.usage) session.contextUsage = { ...(session.contextUsage || {}), usage: (event.message as AppMessage).usage };
       renderLiveTabs();
     }
     if (sessionId !== activeLiveSessionId || !viewingActiveSession) {
@@ -325,16 +343,17 @@ wsClient.addEventListener('rpcEvent', (e) => {
   handleRPCEvent(event, sessionId);
 });
 
-wsClient.addEventListener('serverError', (e) => {
-  messageRenderer.renderError(e.detail.message);
+wsClient.addEventListener('serverError', (e: Event) => {
+  messageRenderer.renderError((e as CustomEvent<{ message: string }>).detail.message);
 });
 
-wsClient.addEventListener('stateUpdate', (e) => {
-  if (e.detail.mode === 'standalone') {
+wsClient.addEventListener('stateUpdate', (e: Event) => {
+  const detail = (e as CustomEvent<{ mode?: string; liveSessions?: LiveSession[] }>).detail;
+  if (detail.mode === 'standalone') {
     const wasViewingLive = viewingActiveSession;
     const launcherVisible = launcherPanel.isVisible();
     isMirrorMode = true;
-    setLiveSessions(e.detail.liveSessions || []);
+    setLiveSessions(detail.liveSessions || []);
     if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
       hasRestoredInitialLiveSession = true;
       restoreActiveLiveSession();
@@ -351,22 +370,23 @@ wsClient.addEventListener('stateUpdate', (e) => {
   }
 });
 
-wsClient.addEventListener('liveSessionCreated', (e) => {
-  upsertLiveSession(e.detail);
+wsClient.addEventListener('liveSessionCreated', (e: Event) => {
+  upsertLiveSession((e as CustomEvent<LiveSession>).detail);
 });
 
-wsClient.addEventListener('liveSessionUpdated', (e) => {
-  upsertLiveSession(e.detail);
-  if (e.detail?.id === activeLiveSessionId) applyActiveSessionMetadata(e.detail);
+wsClient.addEventListener('liveSessionUpdated', (e: Event) => {
+  const detail = (e as CustomEvent<LiveSession>).detail;
+  upsertLiveSession(detail);
+  if (detail?.id === activeLiveSessionId) applyActiveSessionMetadata(detail);
 });
 
-wsClient.addEventListener('liveSessionClosed', (e) => {
-  handleLiveSessionClosed(e.detail.sessionId);
+wsClient.addEventListener('liveSessionClosed', (e: Event) => {
+  handleLiveSessionClosed((e as CustomEvent<{ sessionId: string }>).detail.sessionId);
 });
 
 // Mirror mode: receive full state snapshot on connect
-wsClient.addEventListener('mirrorSync', (e) => {
-  handleMirrorSync(e.detail);
+wsClient.addEventListener('mirrorSync', (e: Event) => {
+  handleMirrorSync((e as CustomEvent<MirrorSyncData>).detail);
 });
 
 // ═══════════════════════════════════════
@@ -378,19 +398,19 @@ const liveTabAddBtn = document.getElementById('live-tab-add');
 const newLiveSessionOverlay = document.getElementById('new-live-session-overlay');
 const newLiveSessionModal = document.getElementById('new-live-session-modal');
 const newLiveSessionForm = document.getElementById('new-live-session-form');
-const newLiveSessionCwd = document.getElementById('new-live-session-cwd');
-const newLiveSessionModel = document.getElementById('new-live-session-model');
+const newLiveSessionCwd = document.getElementById('new-live-session-cwd')!;
+const newLiveSessionModel = document.getElementById('new-live-session-model')!;
 const newLiveSessionProjects = document.getElementById('new-live-session-projects');
-const newLiveSessionSubmit = document.getElementById('new-live-session-submit');
+const newLiveSessionSubmit = document.getElementById('new-live-session-submit')!;
 
-function setLiveSessions(sessions) {
+function setLiveSessions(sessions: LiveSession[]) {
   liveSessions = sessions || [];
   liveInstances = liveSessions.map(s => ({ sessionFile: s.sessionFile, cwd: s.cwd, port: location.port }));
   renderLiveTabs();
   updateMirrorLiveIndicator();
 }
 
-function handleLiveSessionClosed(closedId) {
+function handleLiveSessionClosed(closedId: string) {
   if (!closedId) return;
   liveSessions = liveSessions.filter(s => s.id !== closedId);
   messageQueue = messageQueue.filter(cmd => cmd.sessionId !== closedId);
@@ -431,7 +451,7 @@ function handleLiveSessionClosed(closedId) {
   updateMirrorLiveIndicator();
 }
 
-function upsertLiveSession(session) {
+function upsertLiveSession(session: LiveSession) {
   if (!session) return;
   const idx = liveSessions.findIndex(s => s.id === session.id);
   if (idx >= 0) liveSessions[idx] = { ...liveSessions[idx], ...session };
@@ -447,12 +467,12 @@ function getMostRecentLiveSession() {
   )[0] || null;
 }
 
-function basename(p) {
+function basename(p: string) {
   return (p || '').split(/[/\\]/).filter(Boolean).pop() || p || 'session';
 }
 
-function compactModelLabel(session) {
-  const raw = session.modelLabel || session.modelSpec || session.model?.id || session.model?.name || 'default';
+function compactModelLabel(session: LiveSession) {
+  const raw = session.modelLabel || session.modelSpec || (session.model as ModelRecord)?.id || (session.model as ModelRecord)?.name || 'default';
   return String(raw).replace(/^.*\//, '').replace(/^claude-/, '').replace(/-\d{8}$/, '');
 }
 
@@ -467,7 +487,7 @@ function renderLiveTabs() {
     tab.innerHTML = `
       ${session.isStreaming ? '<span class="live-tab-streaming-dot"></span>' : ''}
       ${hasPendingExtensionUIRequest(session.id) ? '<span class="live-tab-ui-dot" title="Waiting for response">?</span>' : ''}
-      <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd))}</span>
+      <span class="live-tab-title">${escapeHtml(session.sessionName || basename(session.cwd || ''))}</span>
       <span class="live-tab-model">${escapeHtml(compactModelLabel(session))}</span>
       <span class="live-tab-close" title="Close Tau tab">×</span>
     `;
@@ -497,7 +517,7 @@ function restoreActiveLiveSession() {
   }
 }
 
-async function selectLiveSession(id) {
+async function selectLiveSession(id: string) {
   const session = liveSessions.find(s => s.id === id);
   if (!session) return;
   suspendCurrentDialogForTabSwitch(id);
@@ -525,7 +545,7 @@ async function selectLiveSession(id) {
     }
     handleMirrorSync({ ...data, sessionId: id });
   } catch (e) {
-    messageRenderer.renderError(e.message || 'Failed to load live session snapshot');
+    messageRenderer.renderError((e instanceof Error ? e.message : '') || 'Failed to load live session snapshot');
     return;
   }
   if (!fileSidebar.classList.contains('collapsed')) fileBrowser.load();
@@ -534,14 +554,14 @@ async function selectLiveSession(id) {
   flushQueue();
 }
 
-function applyActiveSessionMetadata(session) {
+function applyActiveSessionMetadata(session: LiveSession) {
   if (!session) return;
   // Server is canonical: session.model is always null or a full {provider,id}
   // object, so assign directly. No modelLabel/modelSpec string fallbacks.
   modelPickerController.setModelState(session.model || '', session.thinkingLevel || 'off');
 }
 
-async function closeLiveSession(id) {
+async function closeLiveSession(id: string) {
   const session = liveSessions.find(s => s.id === id);
   if (!session) return;
   const hasQueuedMessages = messageQueue.some(cmd => cmd.sessionId === id);
@@ -615,7 +635,7 @@ newLiveSessionForm?.addEventListener('submit', async (e) => {
     newLiveSessionModel.value = '';
     await selectLiveSession(data.session.id);
   } catch (err) {
-    messageRenderer.renderError(err.message || 'Failed to create Tau tab');
+    messageRenderer.renderError((err instanceof Error ? err.message : '') || 'Failed to create Tau tab');
   } finally {
     newLiveSessionSubmit.disabled = false;
     newLiveSessionSubmit.textContent = 'Create tab';
@@ -626,7 +646,7 @@ newLiveSessionForm?.addEventListener('submit', async (e) => {
 // RPC event handlers
 // ═══════════════════════════════════════
 
-function handleRPCEvent(event, sessionId = null) {
+function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
   switch (event.type) {
     case 'agent_start':
     case 'turn_start':
@@ -637,13 +657,13 @@ function handleRPCEvent(event, sessionId = null) {
       handleAgentEnd();
       break;
     case 'message_start':
-      handleMessageStart(event.message);
+      handleMessageStart(event.message as AppMessage);
       break;
     case 'message_update':
       handleMessageUpdate(event);
       break;
     case 'message_end':
-      handleMessageEnd(event.message);
+      handleMessageEnd(event.message as AppMessage);
       break;
     case 'tool_execution_start':
       handleToolExecutionStart(event);
@@ -685,7 +705,7 @@ function handleCompactionStart() {
   scrollToBottom();
 }
 
-function handleCompactionEnd(event) {
+function handleCompactionEnd(event: AppEvent) {
   const indicator = document.getElementById('compaction-indicator');
   if (indicator) {
     const summary = event.summary ? ` — ${event.summary}` : '';
@@ -723,7 +743,7 @@ function handleAgentEnd() {
 
 let currentStreamingThinking = '';
 
-function handleMessageStart(message) {
+function handleMessageStart(message: AppMessage) {
   if (message.role === 'assistant') {
     currentStreamingText = '';
     currentStreamingThinking = '';
@@ -744,7 +764,7 @@ function handleMessageStart(message) {
   }
 }
 
-function getMessageText(message) {
+function getMessageText(message: AppMessage) {
   if (typeof message.content === 'string') return message.content;
   if (Array.isArray(message.content)) {
     return message.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
@@ -752,7 +772,7 @@ function getMessageText(message) {
   return '';
 }
 
-function getMessageThinking(message) {
+function getMessageThinking(message: AppMessage) {
   if (!Array.isArray(message?.content)) return '';
   return message.content
     .filter(b => b.type === 'thinking')
@@ -761,8 +781,9 @@ function getMessageThinking(message) {
     .join('\n');
 }
 
-function handleMessageUpdate(event) {
+function handleMessageUpdate(event: AppEvent) {
   const { assistantMessageEvent } = event;
+  if (!assistantMessageEvent) return;
 
   if (assistantMessageEvent.type === 'thinking_delta') {
     if (!currentStreamingElement) {
@@ -786,7 +807,7 @@ function handleMessageUpdate(event) {
   }
 }
 
-function handleMessageEnd(message) {
+function handleMessageEnd(message: AppMessage) {
   if (!currentStreamingElement && message?.role === 'assistant') {
     messageRenderer.renderAssistantMessage(message, false, true);
   }
@@ -829,8 +850,9 @@ function handleMessageEnd(message) {
   }
 }
 
-function handleToolExecutionStart(event) {
+function handleToolExecutionStart(event: AppEvent) {
   const { toolCallId, toolName, args } = event;
+  if (!toolCallId) return;
 
   state.addToolExecution(toolCallId, {
     toolName,
@@ -838,11 +860,13 @@ function handleToolExecutionStart(event) {
     status: 'pending',
   });
 
-  toolCardRenderer.createToolCard(state.getToolExecution(toolCallId));
+  const exec = state.getToolExecution(toolCallId);
+  if (exec) toolCardRenderer.createToolCard(exec as ToolExecution);
 }
 
-function handleToolExecutionUpdate(event) {
+function handleToolExecutionUpdate(event: AppEvent) {
   const { toolCallId, partialResult } = event;
+  if (!toolCallId) return;
   const output = formatToolOutput(partialResult);
 
   state.updateToolExecution(toolCallId, {
@@ -850,11 +874,13 @@ function handleToolExecutionUpdate(event) {
     output,
   });
 
-  toolCardRenderer.updateToolCard(state.getToolExecution(toolCallId));
+  const exec = state.getToolExecution(toolCallId);
+  if (exec) toolCardRenderer.updateToolCard(exec as ToolExecution);
 }
 
-function handleToolExecutionEnd(event) {
+function handleToolExecutionEnd(event: AppEvent) {
   const { toolCallId, result, isError } = event;
+  if (!toolCallId) return;
   const output = formatToolOutput(result);
 
   state.updateToolExecution(toolCallId, {
@@ -863,14 +889,14 @@ function handleToolExecutionEnd(event) {
     isError,
   });
 
-  toolCardRenderer.finalizeToolCard(toolCallId, result, isError);
+  toolCardRenderer.finalizeToolCard(toolCallId, result as ToolResult, isError ?? false);
 }
 
-function hasPendingExtensionUIRequest(sessionId) {
+function hasPendingExtensionUIRequest(sessionId: string) {
   return pendingExtensionUIRequests.some(req => req.sessionId === sessionId);
 }
 
-function queueExtensionUIRequest(event, sessionId) {
+function queueExtensionUIRequest(event: AppEvent, sessionId: string) {
   if (!sessionId) {
     handleExtensionUIRequest(event, sessionId);
     return;
@@ -890,7 +916,7 @@ function processQueuedExtensionUIRequest(sessionId = activeLiveSessionId) {
   handleExtensionUIRequest(event, sessionId);
 }
 
-function suspendCurrentDialogForTabSwitch(nextSessionId) {
+function suspendCurrentDialogForTabSwitch(nextSessionId: string) {
   const current = dialogHandler.currentRequest;
   if (!current?.sessionId || current.sessionId === nextSessionId) return;
   const event = current.request;
@@ -901,8 +927,8 @@ function suspendCurrentDialogForTabSwitch(nextSessionId) {
   renderLiveTabs();
 }
 
-function handleExtensionUIRequest(event, sessionId = null) {
-  const request = sessionId ? { ...event, sessionId } : event;
+function handleExtensionUIRequest(event: AppEvent, sessionId: string | null = null) {
+  const request = (sessionId ? { ...event, sessionId } : event) as DialogRequest;
   switch (event.method) {
     case 'select':
       dialogHandler.showSelect(request);
@@ -924,11 +950,12 @@ function handleExtensionUIRequest(event, sessionId = null) {
   }
 }
 
-function formatToolOutput(result) {
+function formatToolOutput(result: unknown) {
   if (!result) return '';
 
-  if (result.content && Array.isArray(result.content)) {
-    return result.content
+  const r = result as { content?: MessageContentBlock[] };
+  if (r.content && Array.isArray(r.content)) {
+    return r.content
       .map((block) => {
         if (block.type === 'text') return block.text;
         return JSON.stringify(block);
@@ -966,9 +993,9 @@ messageInput.addEventListener('input', () => {
 // Attachments (images + file browser paths)
 // ═══════════════════════════════════════
 
-const attachBtn = document.getElementById('attach-btn');
-const imageInput = document.getElementById('image-input');
-const imagePreviews = document.getElementById('image-previews');
+const attachBtn = document.getElementById('attach-btn')!;
+const imageInput = document.getElementById('image-input')!;
+const imagePreviews = document.getElementById('image-previews')!;
 
 let pendingImages: PendingImage[] = [];     // { data: base64, mimeType }
 let pendingFilePaths: PendingFilePath[] = [];  // { path, name, ext } — from file browser (populated by callback above)
@@ -977,7 +1004,7 @@ const MAX_IMAGE_DIM = 2048;
 const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
 
-function getFileChipIcon(name) {
+function getFileChipIcon(name: string) {
   return getFileIcon(name || 'file', false);
 }
 
@@ -1000,7 +1027,7 @@ function processImageFile(file: File): Promise<PendingImage> {
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
-        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        canvas.getContext('2d')?.drawImage(img, 0, 0, width, height);
 
         const outputMime = (mimeType === 'image/jpeg') ? 'image/jpeg' : 'image/png';
         const quality = (outputMime === 'image/jpeg') ? 0.85 : undefined;
@@ -1016,7 +1043,7 @@ function processImageFile(file: File): Promise<PendingImage> {
   });
 }
 
-async function addAttachments(files) {
+async function addAttachments(files: FileList | File[]) {
   for (const file of files) {
     if (!file.type.startsWith('image/')) continue;
     try {
@@ -1031,7 +1058,7 @@ async function addAttachments(files) {
 attachBtn.addEventListener('click', () => imageInput.click());
 
 imageInput.addEventListener('change', () => {
-  addAttachments(imageInput.files);
+  addAttachments(imageInput.files ?? []);
   imageInput.value = '';
 });
 
@@ -1039,20 +1066,21 @@ imageInput.addEventListener('change', () => {
 messageInput.addEventListener('dragover', (e) => { e.preventDefault(); });
 messageInput.addEventListener('drop', (e) => {
   e.preventDefault();
-  if (e.dataTransfer.files.length > 0) addAttachments(e.dataTransfer.files);
+  if (e.dataTransfer && e.dataTransfer.files.length > 0) addAttachments(e.dataTransfer.files);
 });
 
 // Paste images
 messageInput.addEventListener('paste', (e) => {
-  const files = [];
+  if (!e.clipboardData) return;
+  const files: File[] = [];
   for (const item of e.clipboardData.items) {
     if (!item.type.startsWith('image/')) continue;
-    files.push(item.getAsFile());
+    files.push(item.getAsFile() as File);
   }
   if (files.length) addAttachments(files);
 });
 
-function makeRemoveBtn(onClick) {
+function makeRemoveBtn(onClick: () => void) {
   const btn = document.createElement('button');
   btn.className = 'image-preview-remove';
   btn.setAttribute('aria-label', 'Remove');
@@ -1177,7 +1205,7 @@ function sendMessage() {
   wsClient.send(cmd);
 }
 
-const queuedMessagesEl = document.getElementById('queued-messages');
+const queuedMessagesEl = document.getElementById('queued-messages')!;
 
 function renderQueuedMessages() {
   queuedMessagesEl.innerHTML = '';
@@ -1192,10 +1220,10 @@ function renderQueuedMessages() {
     el.className = 'queued-msg';
     el.innerHTML = `
       <span class="queued-msg-label">Queued</span>
-      <span class="queued-msg-text">${escapeHtml(cmd.message)}</span>
+      <span class="queued-msg-text">${escapeHtml(cmd.message || '')}</span>
       <button class="queued-msg-cancel" title="Cancel">×</button>
     `;
-    el.querySelector('.queued-msg-cancel').addEventListener('click', () => {
+    el.querySelector('.queued-msg-cancel')?.addEventListener('click', () => {
       messageQueue.splice(i, 1);
       renderQueuedMessages();
     });
@@ -1204,7 +1232,7 @@ function renderQueuedMessages() {
   queuedMessagesEl.classList.toggle('hidden', queuedMessagesEl.children.length === 0);
 }
 
-function escapeHtml(text) {
+function escapeHtml(text: string) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
@@ -1215,7 +1243,7 @@ function flushQueue() {
   const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId);
   if (idx >= 0) {
     const [cmd] = messageQueue.splice(idx, 1);
-    lastSentMessage = cmd.message;
+    lastSentMessage = cmd.message ?? null;
     messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
     renderQueuedMessages();
     wsClient.send(cmd);
@@ -1364,7 +1392,7 @@ sidebarOverlay.addEventListener('click', () => {
 
 
 
-const newSessionBtn = document.getElementById('new-session-btn');
+const newSessionBtn = document.getElementById('new-session-btn')!;
 newSessionBtn.addEventListener('click', openNewLiveSessionModal);
 
 refreshSessionsBtn.addEventListener('click', () => {
@@ -1437,13 +1465,13 @@ async function newSession() {
   if (!isMobile()) messageInput.focus();
 }
 
-async function handleSessionSelect(session, project) {
-  sidebar.setActive(session.filePath);
+async function handleSessionSelect(session: SidebarSession | null, project: SidebarProject | null) {
+  if (session) sidebar.setActive(session.filePath);
   sessionTotalCost = 0;
   lastInputTokens = 0;
   updateCostDisplay();
   updateTokenUsage();
-  await switchSession(session.filePath, session, project);
+  if (session) await switchSession(session.filePath, session, project);
 
   // Close sidebar on mobile after selecting
   if (isMobile()) {
@@ -1452,7 +1480,7 @@ async function handleSessionSelect(session, project) {
   }
 }
 
-async function switchSession(sessionFile, session = null, project = null) {
+async function switchSession(sessionFile: string | null | undefined, session: SidebarSession | null = null, project: SidebarProject | null = null) {
   try {
     // Clear any streaming state from previous session to prevent bleed
     currentStreamingElement = null;
@@ -1526,7 +1554,7 @@ async function switchSession(sessionFile, session = null, project = null) {
 // Mirror mode sync
 // ═══════════════════════════════════════
 
-function handleMirrorSync(data) {
+function handleMirrorSync(data: MirrorSyncData) {
   console.log('[Mirror] Received state snapshot:', data.entries?.length, 'entries');
   if (data.sessionId && data.sessionId !== activeLiveSessionId) return;
   isMirrorMode = true;
@@ -1622,7 +1650,7 @@ function updateMirrorInputState() {
     messageInput.placeholder = isMirrorMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
     inputArea?.classList.add('mirror-readonly');
   }
-  document.getElementById('command-btn').disabled = !hasLiveSession;
+  document.getElementById('command-btn')!.disabled = !hasLiveSession;
   modelPickerController.setEnabled(hasLiveSession);
 }
 
@@ -1630,7 +1658,7 @@ function updateMirrorInputState() {
 // Session history rendering
 // ═══════════════════════════════════════
 
-function renderSessionHistory(entries) {
+function renderSessionHistory(entries: SessionHistoryEntry[]) {
   console.log(`[History] Rendering ${entries.length} entries`);
   let userCount = 0, assistantCount = 0, toolCardCount = 0, toolResultCount = 0;
 
@@ -1659,13 +1687,13 @@ function renderSessionHistory(entries) {
         messageRenderer.renderUserMessage({ content: content || '', images: images.length > 0 ? images : undefined }, true);
       }
     } else if (msg.role === 'assistant') {
-      const textBlocks = (msg.content || []).filter((b) => b.type === 'text');
-      const thinkingBlocks = (msg.content || []).filter((b) => b.type === 'thinking');
-      const toolCalls = (msg.content || []).filter((b) => b.type === 'toolCall');
+      const textBlocks = ((msg.content as MessageContentBlock[]) || []).filter((b) => b.type === 'text');
+      const thinkingBlocks = ((msg.content as MessageContentBlock[]) || []).filter((b) => b.type === 'thinking');
+      const toolCalls = ((msg.content as MessageContentBlock[]) || []).filter((b) => b.type === 'toolCall');
 
       // Build content blocks for rendering
       const contentBlocks = [];
-      for (const block of msg.content || []) {
+      for (const block of (msg.content as MessageContentBlock[]) || []) {
         if (block.type === 'text' || block.type === 'thinking') {
           contentBlocks.push(block);
         }
@@ -1707,9 +1735,9 @@ function renderSessionHistory(entries) {
     } else if (msg.role === 'toolResult') {
       toolResultCount++;
       toolCardRenderer.addHistoryResult(
-        msg.toolCallId,
-        { content: msg.content || [] },
-        msg.isError
+        msg.toolCallId ?? '',
+        { content: (msg.content as MessageContentBlock[]) || [] },
+        msg.isError ?? false
       );
     }
   }
@@ -1724,6 +1752,7 @@ function renderSessionHistory(entries) {
 
   // Jump to bottom instantly (no smooth scroll animation)
   const messagesEl = document.getElementById('messages');
+  if (!messagesEl) return;
   messagesEl.style.scrollBehavior = 'auto';
   requestAnimationFrame(() => {
     messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1738,7 +1767,7 @@ function renderSessionHistory(entries) {
 // UI helpers
 // ═══════════════════════════════════════
 
-function showTypingIndicator(show) {
+function showTypingIndicator(show: boolean) {
   typingIndicator.classList.toggle('hidden', !show);
 }
 
@@ -1788,7 +1817,8 @@ function showCompactButton() {
     hideCompactButton();
   });
   // Insert next to token usage in header
-  tokenUsageEl.parentElement.insertBefore(btn, tokenUsageEl.nextSibling);
+  const tokenParent = tokenUsageEl.parentElement;
+  if (tokenParent) tokenParent.insertBefore(btn, tokenUsageEl.nextSibling);
 }
 
 function hideCompactButton() {
@@ -1803,7 +1833,7 @@ async function fetchContextWindow() {
 
 let tailscaleUrl = '';
 
-function updateConnectionStatus(status) {
+function updateConnectionStatus(status: string) {
   statusIndicator.className = `status-indicator ${status}`;
 
   if (status === 'connected') {
@@ -1872,16 +1902,16 @@ wsClient.addEventListener('sessionSwitch', () => {
 
 
 
-const settingsBtn = document.getElementById('settings-btn');
-const settingsPanel = document.getElementById('settings-panel');
-const settingsOverlay = document.getElementById('settings-overlay');
-const settingsClose = document.getElementById('settings-close');
-const themeGrid = document.getElementById('theme-grid');
+const settingsBtn = document.getElementById('settings-btn')!;
+const settingsPanel = document.getElementById('settings-panel')!;
+const settingsOverlay = document.getElementById('settings-overlay')!;
+const settingsClose = document.getElementById('settings-close')!;
+const themeGrid = document.getElementById('theme-grid')!;
 
 
-const toggleAutoCompact = document.getElementById('toggle-auto-compact');
-const btnThinkingLevel = document.getElementById('btn-thinking-level');
-const toggleShowThinking = document.getElementById('toggle-show-thinking');
+const toggleAutoCompact = document.getElementById('toggle-auto-compact')!;
+const btnThinkingLevel = document.getElementById('btn-thinking-level')!;
+const toggleShowThinking = document.getElementById('toggle-show-thinking')!;
 
 
 function buildThemeGrid() {
@@ -1982,8 +2012,8 @@ toggleShowThinking.addEventListener('click', () => {
 });
 
 // Auth toggle
-const toggleAuth = document.getElementById('toggle-auth');
-const authSection = document.getElementById('settings-auth-section');
+const toggleAuth = document.getElementById('toggle-auth')!;
+const authSection = document.getElementById('settings-auth-section')!;
 
 toggleAuth.addEventListener('click', async () => {
   const isOn = toggleAuth.classList.contains('on');
@@ -2005,14 +2035,14 @@ applyTheme(savedTheme);
 // Context Window Visualiser
 // ═══════════════════════════════════════
 
-const contextViz = document.getElementById('context-viz');
-const contextBar = document.getElementById('context-bar');
-const contextLegend = document.getElementById('context-legend');
-const contextVizUsed = document.getElementById('context-viz-used');
-const contextVizTotal = document.getElementById('context-viz-total');
+const contextViz = document.getElementById('context-viz')!;
+const contextBar = document.getElementById('context-bar')!;
+const contextLegend = document.getElementById('context-legend')!;
+const contextVizUsed = document.getElementById('context-viz-used')!;
+const contextVizTotal = document.getElementById('context-viz-total')!;
 
 
-function formatTokens(n) {
+function formatTokens(n: number) {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
@@ -2093,7 +2123,7 @@ document.addEventListener('click', (e) => {
 });
 
 // Voice Input
-setupVoiceInput(document.getElementById('mic-btn'), messageInput);
+setupVoiceInput(document.getElementById('mic-btn')!, messageInput);
 
 // ═══════════════════════════════════════
 // Initialize
@@ -2103,7 +2133,7 @@ setupVoiceInput(document.getElementById('mic-btn'), messageInput);
 if (isMobile()) {
   sidebarEl.classList.add('collapsed');
 
-  const mobileBar = document.getElementById('mobile-model-bar');
+  const mobileBar = document.getElementById('mobile-model-bar')!;
   const sessionCost = document.getElementById('session-cost');
   const tokenUsage = document.getElementById('token-usage');
   if (mobileBar && sessionCost && tokenUsage) {
@@ -2115,7 +2145,7 @@ if (isMobile()) {
   mobileBar.classList.add('collapsed');
 
   // Toggle via chevron
-  const contextToggle = document.getElementById('mobile-context-toggle');
+  const contextToggle = document.getElementById('mobile-context-toggle')!;
   contextToggle.addEventListener('click', () => {
     mobileBar.classList.toggle('collapsed');
     contextToggle.classList.toggle('flipped', !mobileBar.classList.contains('collapsed'));

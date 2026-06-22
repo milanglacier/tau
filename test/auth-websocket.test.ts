@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { WebSocket } = require('ws');
+import type { TestContext } from 'node:test';
+import type { WebSocket as WsWebSocket } from 'ws';
 
 // Auth credentials configured, but disabled at startup so same-origin WS
 // upgrades succeed without Basic headers. settings.json pins authEnabled:false
@@ -23,7 +25,7 @@ const { server, computeUrls, liveManager, _setAuthForTest } = require('../bin/ta
 let base = '';
 let wsUrl = '';
 
-before((t, done) => {
+before((t: TestContext, done: () => void) => {
   _setAuthForTest(false);
   server.listen(0, '127.0.0.1', () => {
     const port = server.address().port;
@@ -34,7 +36,7 @@ before((t, done) => {
   });
 });
 
-after((t, done) => {
+after((t: TestContext, done: () => void) => {
   server.close(done);
 });
 
@@ -51,11 +53,11 @@ function connect() {
 // Arm a one-shot message listener and return a promise that resolves with the
 // next received message. Must be called BEFORE the action that triggers the
 // broadcast, so the listener is attached before the event fires.
-function armNextMessage(ws, timeout = 2000): Promise<any> {
+function armNextMessage(ws: WsWebSocket, timeout = 2000): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('timed out waiting for WS message')), timeout);
-    ws.once('message', (data) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });
-    ws.once('error', (e) => { clearTimeout(timer); reject(e); });
+    ws.once('message', (data: Buffer) => { clearTimeout(timer); resolve(JSON.parse(data.toString())); });
+    ws.once('error', (e: Error) => { clearTimeout(timer); reject(e); });
   });
 }
 
@@ -66,7 +68,7 @@ test('set_auth { enabled: true } broadcasts auth_changed and closes clients with
   const authMsgP = armNextMessage(ws);
   const closeP = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('client was not closed')), 2000);
-    ws.on('close', (c) => { clearTimeout(timer); resolve(c); });
+    ws.on('close', (c: number) => { clearTimeout(timer); resolve(c); });
   });
   const res = await fetch(`${base}/api/rpc`, {
     method: 'POST',

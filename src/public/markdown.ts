@@ -5,15 +5,15 @@
  * task lists, images, paragraphs.
  */
 
-export function renderMarkdown(text) {
+export function renderMarkdown(text: string) {
   if (!text) return '';
 
   // Normalize line endings
   text = text.replace(/\r\n/g, '\n');
 
   // Extract code blocks first to protect them
-  const codeBlocks = [];
-  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+  const codeBlocks: { lang: string; code: string }[] = [];
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang: string, code: string) => {
     const idx = codeBlocks.length;
     codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
     return `%%CODEBLOCK_${idx}%%`;
@@ -25,7 +25,7 @@ export function renderMarkdown(text) {
   let inList = false;
   let listType = '';
   let inBlockquote = false;
-  let blockquoteLines = [];
+  let blockquoteLines: string[] = [];
 
   function flushBlockquote() {
     if (inBlockquote) {
@@ -40,18 +40,18 @@ export function renderMarkdown(text) {
   }
 
   // Check if a line is a table separator (e.g. |---|---|)
-  function isTableSeparator(line) {
+  function isTableSeparator(line: string) {
     return /^\|?(\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line);
   }
 
   // Check if a line looks like a table row
-  function isTableRow(line) {
+  function isTableRow(line: string) {
     return line.trim().startsWith('|') && line.trim().endsWith('|');
   }
 
   // Parse alignment from separator row
-  function parseAlignments(line) {
-    return line.split('|').filter(c => c.trim()).map(cell => {
+  function parseAlignments(line: string) {
+    return line.split('|').filter((c: string) => c.trim()).map((cell: string) => {
       const trimmed = cell.trim();
       if (trimmed.startsWith(':') && trimmed.endsWith(':')) return 'center';
       if (trimmed.endsWith(':')) return 'right';
@@ -83,12 +83,12 @@ export function renderMarkdown(text) {
       const alignments = parseAlignments(lines[i + 1]);
 
       // Parse header
-      const headerCells = line.split('|').filter(c => c.trim() !== '' || line.trim() === '|');
+      const headerCells = line.split('|').filter((c: string) => c.trim() !== '' || line.trim() === '|');
       // More robust: split between first and last pipe
       const headerRow = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
 
       html += '<div class="table-wrapper"><table><thead><tr>';
-      headerRow.forEach((cell, idx) => {
+      headerRow.forEach((cell: string, idx: number) => {
         const align = alignments[idx] || 'left';
         html += `<th style="text-align:${align}">${renderInline(cell.trim())}</th>`;
       });
@@ -101,7 +101,7 @@ export function renderMarkdown(text) {
       while (i < lines.length && isTableRow(lines[i])) {
         const rowCells = lines[i].trim().replace(/^\|/, '').replace(/\|$/, '').split('|');
         html += '<tr>';
-        rowCells.forEach((cell, idx) => {
+        rowCells.forEach((cell: string, idx: number) => {
           const align = alignments[idx] || 'left';
           html += `<td style="text-align:${align}">${renderInline(cell.trim())}</td>`;
         });
@@ -213,14 +213,14 @@ export function renderMarkdown(text) {
  * Lightweight user-message renderer — inline formatting + blockquotes only.
  * Preserves whitespace/newlines for everything else.
  */
-export function renderUserMarkdown(text) {
+export function renderUserMarkdown(text: string) {
   if (!text) return '';
   text = text.replace(/\r\n/g, '\n');
 
   const lines = text.split('\n');
   let html = '';
   let inBlockquote = false;
-  let bqLines = [];
+  let bqLines: string[] = [];
 
   function flushBq() {
     if (inBlockquote) {
@@ -244,10 +244,10 @@ export function renderUserMarkdown(text) {
   return html.replace(/\n$/, '');
 }
 
-function renderInline(text) {
+function renderInline(text: string) {
   // Inline code (must come first to protect content)
-  const codeSpans = [];
-  text = text.replace(/`([^`]+)`/g, (_, code) => {
+  const codeSpans: string[] = [];
+  text = text.replace(/`([^`]+)`/g, (_, code: string) => {
     const idx = codeSpans.length;
     codeSpans.push(`<code>${escapeHtml(code)}</code>`);
     return `%%ICODE${idx}%%`;
@@ -277,12 +277,12 @@ function renderInline(text) {
   text = text.replace(/(^|[^"'])(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
 
   // Restore inline code
-  text = text.replace(/%%ICODE(\d+)%%/g, (_, idx) => codeSpans[parseInt(idx)]);
+  text = text.replace(/%%ICODE(\d+)%%/g, (_, idx: string) => codeSpans[parseInt(idx)]);
 
   return text;
 }
 
-function escapeHtml(text) {
+function escapeHtml(text: string) {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -292,8 +292,11 @@ function escapeHtml(text) {
 
 // Global copy function for code blocks
 window.copyCode = function(btn) {
-  const codeBlock = btn.closest('.code-block-wrapper').querySelector('code');
-  const text = codeBlock.textContent;
+  const wrapper = btn.closest('.code-block-wrapper');
+  if (!wrapper) return;
+  const codeBlock = wrapper.querySelector('code');
+  if (!codeBlock) return;
+  const text = codeBlock.textContent || '';
   navigator.clipboard.writeText(text).then(() => {
     btn.textContent = 'Copied!';
     btn.classList.add('copied');

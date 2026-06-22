@@ -8,18 +8,31 @@ process.env.PI_CODING_AGENT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-pir
 process.env.PI_CODING_AGENT_SESSION_DIR = path.join(process.env.PI_CODING_AGENT_DIR, 'sessions');
 
 const { PiRpcSession, normalizeModel, parseModelSpecToModel, handleRpcCommand, liveManager, _setSpawnPiForTest } = require('../bin/tau.js');
+import type { TestContext } from 'node:test';
+
+interface BroadcastMsg {
+  type: string;
+  sessionId?: string;
+  event?: { type: string; [k: string]: unknown };
+  session?: { id: string; [k: string]: unknown };
+  [k: string]: unknown;
+}
+
+type RpcCommand = { type: string; id?: string; message?: string; [k: string]: unknown };
+type RpcOpts = { timeoutMs?: number };
+type FakeWrite = (data: string, cb?: (err?: Error | null) => void) => void;
 
 function makeManager() {
-  const broadcasts = [];
-  const updated = [];
-  const removed = [];
+  const broadcasts: BroadcastMsg[] = [];
+  const updated: string[] = [];
+  const removed: Array<{ id: string; reason: string }> = [];
   return {
     broadcasts,
     updated,
     removed,
-    broadcast(msg) { broadcasts.push(msg); },
-    broadcastUpdated(id) { updated.push(id); },
-    removeExited(id, reason) { removed.push({ id, reason }); },
+    broadcast(msg: BroadcastMsg) { broadcasts.push(msg); },
+    broadcastUpdated(id: string) { updated.push(id); },
+    removeExited(id: string, reason: string) { removed.push({ id, reason }); },
   };
 }
 
@@ -94,7 +107,7 @@ test('handleResponse resolves a pending send command and updates state', async (
   const { session } = makeSession();
   // stub a child with a writable stdin that accepts the write
   session.child = {
-    stdin: { writable: true, write: (_data, cb) => cb && cb() },
+    stdin: { writable: true, write: ((_data: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite },
   };
   const p = session.send({ type: 'get_session_stats' }, { timeoutMs: 500 });
   // find the assigned id from the pending map
@@ -121,23 +134,23 @@ test('send rejects when the child stdin is not writable', async () => {
 
 test('send rejects when terminating', async () => {
   const { session } = makeSession();
-  session.child = { stdin: { writable: true, write: (_d, cb) => cb && cb() } };
+  session.child = { stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite } };
   session.terminating = true;
   await assert.rejects(() => session.send({ type: 'prompt', message: 'hi' }), /not running/);
 });
 
-test('terminate rejects pending commands and escalates to SIGKILL when SIGTERM is ignored', async (t) => {
+test('terminate rejects pending commands and escalates to SIGKILL when SIGTERM is ignored', async (t: TestContext) => {
   // Mock the SIGTERM grace wait so the escalation logic runs without a real
   // 1.5s sleep. clearTimeout is mocked automatically alongside setTimeout.
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { session } = makeSession();
-  const killedSignals = [];
+  const killedSignals: string[] = [];
   // a stubborn child that never exits and records kill signals
   session.child = {
     exitCode: null,
     signalCode: null,
-    stdin: { writable: true, write: (_d, cb) => cb && cb() },
-    kill(sig) { killedSignals.push(sig); },
+    stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite },
+    kill(sig: string) { killedSignals.push(sig); },
   };
   // plant a pending command; attach the rejection handler BEFORE terminate
   // runs so the pending rejection isn't reported as an unhandled rejection.
@@ -153,15 +166,15 @@ test('terminate rejects pending commands and escalates to SIGKILL when SIGTERM i
   assert.deepEqual(killedSignals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('terminate does not escalate to SIGKILL if the child already exited after SIGTERM', async (t) => {
+test('terminate does not escalate to SIGKILL if the child already exited after SIGTERM', async (t: TestContext) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { session } = makeSession();
-  const killedSignals = [];
+  const killedSignals: string[] = [];
   session.child = {
     exitCode: null,
     signalCode: null,
-    stdin: { writable: true, write: (_d, cb) => cb && cb() },
-    kill(sig) {
+    stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite },
+    kill(sig: string) {
       killedSignals.push(sig);
       // simulate the process exiting due to SIGTERM
       session.child.exitCode = 0;
@@ -177,7 +190,7 @@ test('terminate does not escalate to SIGKILL if the child already exited after S
 test('handleExit rejects pending and notifies the manager once', async () => {
   const manager = makeManager();
   const session = new PiRpcSession(manager, { cwd: '/tmp' });
-  session.child = { stdin: { writable: true, write: (_d, cb) => cb && cb() } };
+  session.child = { stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite } };
   const p = session.send({ type: 'get_session_stats' }, { timeoutMs: 100000 });
   const check = assert.rejects(p, /Pi process exited/);
   session.handleExit(1, null);
@@ -288,8 +301,8 @@ test('set_thinking_level echo: session.thinkingLevel updates even when pi return
   const { session } = makeSession('openai/gpt-4o');
   liveManager.sessions.set(session.id, session);
   try {
-    session.child = { stdin: { writable: true, write: (_d, cb) => cb && cb() } };
-    session.send = (_command, _opts) =>
+    session.child = { stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite } };
+    session.send = (_command: RpcCommand, _opts: RpcOpts) =>
       Promise.resolve({ type: 'response', success: true, data: {} });
     const resp = await handleRpcCommand({
       type: 'set_thinking_level', level: 'high', sessionId: session.id,
@@ -306,8 +319,8 @@ test('set_thinking_level restores previous level on pi failure', async () => {
   liveManager.sessions.set(session.id, session);
   try {
     assert.equal(session.thinkingLevel, 'medium');
-    session.child = { stdin: { writable: true, write: (_d, cb) => cb && cb() } };
-    session.send = (_command, _opts) =>
+    session.child = { stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite } };
+    session.send = (_command: RpcCommand, _opts: RpcOpts) =>
       Promise.resolve({ type: 'response', success: false, error: 'nope' });
     const resp = await handleRpcCommand({
       type: 'set_thinking_level', level: 'high', sessionId: session.id,
@@ -325,10 +338,10 @@ test('extension-refresh: prompt ack triggers get_state refresh and broadcast', a
   // broadcastUpdated path is exercised against a real manager.
   liveManager.sessions.set(session.id, session);
   try {
-    session.child = { stdin: { writable: true, write: (_d, cb) => cb && cb() } };
+    session.child = { stdin: { writable: true, write: ((_d: string, cb?: (err?: Error | null) => void) => cb && cb()) as FakeWrite } };
     // Track outbound command sequence: first prompt, then get_state.
-    let calls = [];
-    session.send = (command, opts) => {
+    let calls: string[] = [];
+    session.send = (command: RpcCommand, opts: RpcOpts) => {
       calls.push(command.type);
       const id = command.id || `cmd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,6)}`;
       if (command.type === 'prompt') {
@@ -344,10 +357,10 @@ test('extension-refresh: prompt ack triggers get_state refresh and broadcast', a
       return Promise.resolve({ type: 'response', id, success: true, data: {} });
     };
     // Collect broadcastUpdated calls from the real liveManager.
-    const updatedIds = [];
+    const updatedIds: string[] = [];
     const origBroadcast = liveManager.broadcast.bind(liveManager);
-    liveManager.broadcast = (msg) => {
-      if (msg && msg.type === 'live_session_updated') updatedIds.push(msg.session.id);
+    liveManager.broadcast = (msg: BroadcastMsg | null) => {
+      if (msg && msg.type === 'live_session_updated' && msg.session) updatedIds.push(msg.session.id);
       origBroadcast(msg);
     };
     const resp = await handleRpcCommand({
