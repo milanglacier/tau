@@ -13,19 +13,13 @@ work with multiple Pi sessions side by side in your browser.
 
 | Area | Upstream (`5e2bce39`) | This fork |
 |---|---|---|
-| **Architecture** | Pi extension loaded inside the Pi TUI process; the browser mirrored a single TUI session | Standalone Node.js server (`bin/tau.js`) that spawns independent `pi --mode rpc` child processes |
+| **Architecture** | Pi extension loaded inside the Pi TUI process; browser mirrors a single TUI session | Standalone Node.js server that spawns independent `pi --mode rpc` child processes |
 | **Multiple sessions** | One browser page, one Pi session — the mirror of whatever the TUI was doing | In-page tabs each backed by their own Pi RPC subprocess; run N sessions in parallel |
 | **Session lifecycle** | Tied to the Pi TUI session — close the TUI and the mirror died | Sessions are server-owned; closing/reloading the browser does not kill Pi children |
-| **`package.json`** | Registeres as a Pi package with `pi.extensions` | Declares a `bin` entry (`tau`); no longer a Pi extension |
-| **Language** | Plain JavaScript (`.js` files in `public/` and `bin/`) | TypeScript throughout — server, browser, extensions, and tests all use `.ts` with strict mode |
-| **Entrypoint** | Extension activated by Pi at startup (`extensions/mirror-server.ts`) | Shell command (`tau`) that boots HTTP + WebSocket server, CLI args, and graceful shutdown |
-| **Pi communication** | In-process Pi extension API (`api.sendCommand`, event subscriptions) | Out-of-process JSON line-delimited RPC over stdin/stdout of a `pi --mode rpc` subprocess |
-| **Source structure** | Monolithic `bin/tau.js` and `public/app.js` | Modular TypeScript — server split into `server-main.ts`, `sessions.ts`, `config.ts`, `model-utils.ts`, `types.ts`; browser split into `app-main.ts`, `model-picker.ts`, `command-palette.ts`, `launcher-panel.ts`, `voice-input.ts`, `app-types.ts` |
-| **Test coverage** | No tests | Full test suite (`node --test`) covering RPC sessions, live session manager, HTTP routes, WebSocket auth, path resolution, etc. |
+| **Pi communication** | In-process Pi extension API | Out-of-process JSON line-delimited RPC over stdin/stdout |
+| **Test coverage** | No tests | Full test suite |
 | **Auto-start** | Extension auto-started inside Pi unless `TAU_DISABLED=1` | Always explicit — the user runs `tau` when they want it |
-| **Session history** | Not present (mirror-only) | Full session history browser with full-text search across saved Pi JSONL files |
-| **Multi-device** | Limited — the extension started an HTTP server, but only one Pi process meant one session | Open the Tau server from your phone, tablet, or another monitor — each client sees the same pool of live sessions |
-| **Auth** | Full HTTP Basic Auth gating HTTP + WebSocket | Same, plus auth can be toggled at runtime from the Settings UI |
+| **Multi-device** | Limited — HTTP server but only one session | Open from any device — all clients share the same live session pool |
 
 ![Tau dark mode](docs/images/dark.png)
 
