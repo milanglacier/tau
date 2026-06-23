@@ -1,6 +1,6 @@
-# Pi Web UI
+# Pi Tau Web Server
 
-Build a web-based chat UI for Pi (the coding agent).
+Build a web-based chat UI for Pi (the coding agent), packaged as a standalone web server.
 
 ## Architecture
 

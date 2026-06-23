@@ -1,7 +1,7 @@
 {
-  "name": "tau-mirror",
+  "name": "pi-tau-web-server",
   "version": "1.0.8",
-  "description": "Standalone web app for managing Pi RPC sessions in the browser",
+  "description": "Standalone web server for managing multiple Pi RPC sessions in the browser",
   "keywords": [
     "pi",
     "coding-agent",
@@ -13,10 +13,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/deflating/tau.git"
+    "url": "https://github.com/milanglacier/pi-tau-web-server.git"
   },
   "bin": {
-    "tau": "./bin/tau.js"
+    "pi-tau-web-server": "./bin/tau.js"
   },
   "files": [
     "bin",

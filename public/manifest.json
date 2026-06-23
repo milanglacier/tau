@@ -1,7 +1,7 @@
 {
-  "name": "Tau",
-  "short_name": "Tau",
-  "description": "Web UI for pi coding agent",
+  "name": "Pi Tau Web Server",
+  "short_name": "Pi Tau",
+  "description": "Standalone web server for managing multiple Pi RPC sessions in the browser",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#f5f3ef",

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tau.pi-daemon</string>
+    <string>com.pi-tau-web-server.pi-daemon</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/tmux</string>

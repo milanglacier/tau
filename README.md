@@ -1,8 +1,8 @@
-# Tau
+# Pi Tau Web Server
 
-**Browser workspace for [Pi](https://github.com/milanglacier/tau) — a standalone web server that manages multiple live Pi RPC sessions in parallel.**
+**Browser workspace for [Pi](https://github.com/milanglacier/pi-tau-web-server) — a standalone web server that manages multiple live Pi RPC sessions in parallel.**
 
-Tau is a fork of [deflating/tau](https://github.com/deflating/tau), forked at
+Pi Tau Web Server is a fork of [deflating/tau](https://github.com/deflating/tau), forked at
 [`5e2bce39`](https://github.com/deflating/tau/tree/5e2bce39) and rewritten from
 a Pi extension that ran inside the Pi TUI into a standalone Node.js web server.
 Instead of living inside a TUI session, Tau runs one backend process and spawns
@@ -18,7 +18,7 @@ work with multiple Pi sessions side by side in your browser.
 | **Session lifecycle** | Tied to the Pi TUI session — close the TUI and the mirror died | Sessions are server-owned; closing/reloading the browser does not kill Pi children |
 | **Pi communication** | In-process Pi extension API | Out-of-process JSON line-delimited RPC over stdin/stdout |
 | **Test coverage** | No tests | Full test suite |
-| **Auto-start** | Extension auto-started inside Pi unless `TAU_DISABLED=1` | Always explicit — the user runs `tau` when they want it |
+| **Auto-start** | Extension auto-started inside Pi unless `TAU_DISABLED=1` | Always explicit — the user runs `pi-tau-web-server` when they want it |
 | **Multi-device** | Limited — HTTP server but only one session | Open from any device — all clients share the same live session pool |
 
 ![Tau light mode](docs/images/main-page.jpg)
@@ -39,7 +39,7 @@ work with multiple Pi sessions side by side in your browser.
 
 ## What it does
 
-- **Standalone server** — run `tau`; it serves the web UI and manages Pi RPC child processes as subprocesses via `pi --mode rpc`
+- **Standalone server** — run `pi-tau-web-server`; it serves the web UI and manages Pi RPC child processes as subprocesses via `pi --mode rpc`
 - **Multiple live sessions** — in-page Tau tabs (not browser tabs) each represent a live Pi RPC session. Create, switch, and close them from one browser page. Tau runs all of them in parallel.
 - **Session persistence while the server runs** — closing or reloading the browser does not kill Pi child sessions; only closing an in-page Tau tab or shutting down the Tau server does
 - **Works on any device** — open the same Tau server from your phone, tablet, or another monitor
@@ -49,20 +49,20 @@ work with multiple Pi sessions side by side in your browser.
 ## Install
 
 ```bash
-npm install -g git+https://github.com/milanglacier/tau.git#main
+npm install -g git+https://github.com/milanglacier/pi-tau-web-server.git#main
 ```
 
 ## Usage
 
 ```bash
-tau
+pi-tau-web-server
 ```
 
 Open the printed URL (default `http://localhost:3001`). Click `+` in the tab bar or sidebar to create an in-page Tau tab, choose or type a project directory, optionally enter a Pi `/model`-style model string, then chat.
 
 ```bash
-tau --host 127.0.0.1 --port 3001 --open
-TAU_PORT=3001 TAU_HOST=0.0.0.0 TAU_PROJECTS_DIR="$HOME/projects" tau
+pi-tau-web-server --host 127.0.0.1 --port 3001 --open
+TAU_PORT=3001 TAU_HOST=0.0.0.0 TAU_PROJECTS_DIR="$HOME/projects" pi-tau-web-server
 ```
 
 ## Features
@@ -142,7 +142,7 @@ Tau also reads matching values from `~/.pi/agent/settings.json` under the `tau` 
 
 ### Authentication
 
-Tau supports optional HTTP Basic Auth. Set credentials in `~/.pi/agent/settings.json` or via environment variables, then toggle "Require login" in Tau Settings.
+Tau Web Server supports optional HTTP Basic Auth. Set credentials in `~/.pi/agent/settings.json` or via environment variables, then toggle "Require login" in Tau Settings.
 
 ```json
 {
@@ -158,21 +158,21 @@ Both HTTP and WebSocket connections are gated when enabled. `/api/health` remain
 ## How it works
 
 ```
-┌─────────────┐     ┌──────────────────────────────┐     ┌───────────────────────────┐
-│  Browser    │◄───►│  Tau standalone server       │◄───►│  pi --mode rpc            │
-│  (Tau UI)   │     │  HTTP + WebSocket +           │     │  child session 1          │
-│             │     │  LiveSessionManager           │     ├───────────────────────────┤
-│             │     │  (Node.js)                    │     │  pi --mode rpc            │
-│             │     │                               │     │  child session 2          │
-│             │     │                               │     ├───────────────────────────┤
-│             │     │                               │     │  pi --mode rpc            │
-│             │     │                               │     │  child session (N)        │
-└─────────────┘     └──────────────────────────────┘     └───────────────────────────┘
+┌─────────────┐     ┌──────────────────────────┐     ┌───────────────────────────┐
+│  Browser    │◄───►│  Tau Web Server          │◄───►│  pi --mode rpc            │
+│  (Tau UI)   │     │  HTTP + WebSocket +      │     │  child session 1          │
+│             │     │  LiveSessionManager      │     ├───────────────────────────┤
+│             │     │  (Node.js)               │     │  pi --mode rpc            │
+│             │     │                          │     │  child session 2          │
+│             │     │                          │     ├───────────────────────────┤
+│             │     │                          │     │  pi --mode rpc            │
+│             │     │                          │     │  child session (N)        │
+└─────────────┘     └──────────────────────────┘     └───────────────────────────┘
 ```
 
-The browser connects to Tau over WebSocket (and HTTP for history and API calls). Tau manages a pool of `PiRpcSession` instances, each of which spawns a `pi --mode rpc` subprocess. Communication with Pi is over JSON line-delimited RPC via stdin/stdout. Closing an in-page Tau tab sends a DELETE request that terminates the corresponding Pi child. Shutting down Tau terminates all managed children.
+The browser connects to Tau Web Server over WebSocket (and HTTP for history and API calls). Tau manages a pool of `PiRpcSession` instances, each of which spawns a `pi --mode rpc` subprocess. Communication with Pi is over JSON line-delimited RPC via stdin/stdout. Closing an in-page Tau tab sends a DELETE request that terminates the corresponding Pi child. Shutting down Tau terminates all managed children.
 
-The deprecated Pi extension (`extensions/mirror-server.ts`) is a no-op that prints a message telling users to run `tau` from the shell instead.
+The deprecated Pi extension (`extensions/mirror-server.ts`) is a no-op that prints a message telling users to run `pi-tau-web-server` from the shell instead.
 
 ## Development
 
@@ -184,12 +184,12 @@ The deprecated Pi extension (`extensions/mirror-server.ts`) is a no-op that prin
 ### Setup
 
 ```bash
-git clone https://github.com/milanglacier/tau.git
-cd tau
+git clone https://github.com/milanglacier/pi-tau-web-server.git
+cd pi-tau-web-server
 npm install
 npm run build
 npm link
-tau --projects-dir ~/code
+pi-tau-web-server --projects-dir ~/code
 ```
 
 The project is written in TypeScript, with separate `tsconfig.json` files:
@@ -203,7 +203,7 @@ The project is written in TypeScript, with separate `tsconfig.json` files:
 
 Compiled JS is not committed to git (see `.gitignore`). Always run `npm run build` (or `tsc -p <config>`) after editing TypeScript source.
 
-Edit `public/` files and refresh the browser. Restart `tau` after changing server code in `src/server/`.
+Edit `public/` files and refresh the browser. Restart `pi-tau-web-server` after changing server code in `src/server/`.
 
 ### Tests
 
