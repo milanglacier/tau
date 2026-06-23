@@ -149,3 +149,29 @@ Addressed the round 2 review findings without changing the existing assessment t
 - Added regression coverage for resume-after-close waiting on termination and for generic `session_name` events not reaching clients.
 
 Validation: `npm test` passes with 136 tests.
+
+## Code Review — 2026-06-23 (Round 4)
+
+### Findings
+
+1. **Skip the read-only history load before resuming**
+
+   `switchSession()` still runs the old historical-session path before the standalone resume path: it fetches `/api/sessions/:dirName/:file` and renders the JSONL at `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:1533-1548`, then clears that work and starts the real resume request at lines 1569-1574. Since `selectLiveSession()` fetches the resumed tab snapshot again, every sidebar resume now performs two full history loads and waits for the read-only one before spawning/focusing the live tab. Large sessions will open noticeably slower and flash a transcript that is immediately discarded; skip this block when `isMirrorMode` is true.
+
+   Location: `/home/milanglacier/Desktop/personal-projects/tau/src/public/app-main.ts:1533-1574`
+
+### Overall Assessment
+
+Verdict: **Needs revision.**
+
+Explanation: The server-side duplicate and title issues from the earlier rounds are addressed, and `npm test` passes with 136 tests. The client still performs the obsolete read-only history load before every standalone resume, which adds avoidable latency and visual jank to the core flow.
+
+## Fix Summary — 2026-06-23 (Round 4)
+
+Addressed the round 4 review finding without changing the existing assessment text.
+
+- The standalone resume path now runs before the old read-only history path, so clicking a historical session in standalone mode goes directly to focusing an existing live tab or calling `/api/live-sessions/resume`.
+- The obsolete pre-resume `/api/sessions/:dirName/:file` fetch and temporary read-only render are skipped in standalone mode; the resumed live tab snapshot remains the single source used to render historical entries.
+- Renamed the misleading `isMirrorMode` client flag to `isStandaloneMode` and updated its definition comment to reflect the current architecture: Tau is connected to a standalone server that owns live Pi RPC sessions.
+
+Validation: `npm run typecheck` and `npm test` pass with 136 tests.

@@ -171,11 +171,11 @@ let hasFocus = true;
 let unreadCount = 0;
 let isScrolledUp = false;
 let hasNewWhileScrolled = false;
-let lastSentMessage: string | null = null; // Track to avoid duplicate rendering in mirror mode
+let lastSentMessage: string | null = null; // Track to avoid duplicate rendering from backend echo events
 let lastUsage: UsageRecord | null = null; // Full usage object for context visualiser
 let mirrorActiveSessionFile: string | null = null; // The active live session file path
 let viewingActiveSession = false; // Whether we're viewing a live backend Tau tab or historical read-only session
-let isMirrorMode = false; // Legacy name: true when standalone live-session mode is connected
+let isStandaloneMode = false; // True once connected to the standalone server that owns live Pi RPC sessions
 let liveInstances: LiveInstance[] = []; // Legacy sidebar live indicators; now derived from backend live sessions
 let liveSessions: LiveSession[] = [];
 let activeLiveSessionId = localStorage.getItem('tau-active-live-session-id') || null;
@@ -352,7 +352,7 @@ wsClient.addEventListener('stateUpdate', (e: Event) => {
   if (detail.mode === 'standalone') {
     const wasViewingLive = viewingActiveSession;
     const launcherVisible = launcherPanel.isVisible();
-    isMirrorMode = true;
+    isStandaloneMode = true;
     setLiveSessions(detail.liveSessions || []);
     if (!hasRestoredInitialLiveSession || (wasViewingLive && !launcherVisible)) {
       hasRestoredInitialLiveSession = true;
@@ -384,7 +384,7 @@ wsClient.addEventListener('liveSessionClosed', (e: Event) => {
   handleLiveSessionClosed((e as CustomEvent<{ sessionId: string }>).detail.sessionId);
 });
 
-// Mirror mode: receive full state snapshot on connect
+// Legacy mirrorSync payload: receive a full live-session state snapshot.
 wsClient.addEventListener('mirrorSync', (e: Event) => {
   handleMirrorSync((e as CustomEvent<MirrorSyncData>).detail);
 });
@@ -788,8 +788,8 @@ function handleMessageStart(message: AppMessage) {
       true
     );
   } else if (message.role === 'user') {
-    // In mirror mode, user messages from TUI appear via events
-    // Only render if we didn't just send this message ourselves
+    // User messages can echo back via backend events; only render if we did
+    // not just send this message ourselves.
     if (!lastSentMessage || getMessageText(message) !== lastSentMessage) {
       const content = getMessageText(message);
       if (content) {
@@ -1439,7 +1439,7 @@ refreshSessionsBtn.addEventListener('click', () => {
   refreshSessionsBtn.classList.add('spinning');
   sidebar.loadSessions().then(() => {
     setTimeout(() => refreshSessionsBtn.classList.remove('spinning'), 600);
-    if (isMirrorMode) updateMirrorLiveIndicator();
+    if (isStandaloneMode) updateMirrorLiveIndicator();
   });
 });
 
@@ -1522,7 +1522,7 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     currentStreamingElement = null;
     currentStreamingThinking = '';
     currentStreamingText = '';
-    if (isMirrorMode) viewingActiveSession = false;
+    if (isStandaloneMode) viewingActiveSession = false;
     
     state.reset();
     showTypingIndicator(false);
@@ -1530,43 +1530,17 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
     messageRenderer.clear();
     toolCardRenderer.clear();
 
-    if (sessionFile && session) {
-      messageRenderer.renderSystemMessage('Loading session...');
-
-      const dirName = project?.dirName;
-      const file = session.file;
-      console.log('[App] Loading history:', { dirName, file, sessionFile });
-
-      if (dirName && file) {
-        try {
-          const res = await fetch(`/api/sessions/${dirName}/${file}`);
-          console.log('[App] History fetch status:', res.status);
-          const data = await res.json();
-          console.log('[App] History entries:', data.entries?.length || 0);
-
-          messageRenderer.clear();
-          renderSessionHistory(data.entries || []);
-        } catch (e) {
-          console.error('[App] History fetch error:', e);
-        }
-      } else {
-        console.log('[App] Skipped history load: dirName or file missing');
-      }
-    } else {
-      messageRenderer.renderWelcome();
-    }
-
     // In standalone mode, clicking a historical session resumes it as a
-    // live backend Tau tab. If a live tab already exists for that session
-    // file, just focus it instead of creating a duplicate.
-    if (isMirrorMode) {
+    // live backend Tau tab. Skip the old read-only history render here because
+    // selectLiveSession() will load the resumed tab snapshot with the same
+    // historical entries after the backend has attached to the session file.
+    if (isStandaloneMode && sessionFile) {
       const live = liveSessions.find(s => s.sessionFile === sessionFile);
       if (live) {
         await selectLiveSession(live.id);
         return;
       }
       // No live tab yet — ask the server to resume this session.
-      messageRenderer.clear();
       messageRenderer.renderSystemMessage('Resuming session…');
       try {
         const resumeBody: Record<string, unknown> = { filePath: sessionFile };
@@ -1601,7 +1575,35 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
         updateUI();
       }
       return;
+    }
+
+    if (sessionFile && session) {
+      messageRenderer.renderSystemMessage('Loading session...');
+
+      const dirName = project?.dirName;
+      const file = session.file;
+      console.log('[App] Loading history:', { dirName, file, sessionFile });
+
+      if (dirName && file) {
+        try {
+          const res = await fetch(`/api/sessions/${dirName}/${file}`);
+          console.log('[App] History fetch status:', res.status);
+          const data = await res.json();
+          console.log('[App] History entries:', data.entries?.length || 0);
+
+          messageRenderer.clear();
+          renderSessionHistory(data.entries || []);
+        } catch (e) {
+          console.error('[App] History fetch error:', e);
+        }
+      } else {
+        console.log('[App] Skipped history load: dirName or file missing');
+      }
     } else {
+      messageRenderer.renderWelcome();
+    }
+
+    if (!isStandaloneMode) {
       const res = await fetch('/api/sessions/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1620,13 +1622,13 @@ async function switchSession(sessionFile: string | null | undefined, session: Si
 }
 
 // ═══════════════════════════════════════
-// Mirror mode sync
+// Standalone live-session snapshot sync (legacy mirrorSync payload)
 // ═══════════════════════════════════════
 
 function handleMirrorSync(data: MirrorSyncData) {
-  console.log('[Mirror] Received state snapshot:', data.entries?.length, 'entries');
+  console.log('[Standalone] Received state snapshot:', data.entries?.length, 'entries');
   if (data.sessionId && data.sessionId !== activeLiveSessionId) return;
-  isMirrorMode = true;
+  isStandaloneMode = true;
 
   // Track the active session
   mirrorActiveSessionFile = data.sessionFile || data.session?.sessionFile || null;
@@ -1671,7 +1673,7 @@ function handleMirrorSync(data: MirrorSyncData) {
 // Mark all live sessions in the sidebar with a green dot
 function updateMirrorLiveIndicator() {
   const liveFiles = new Set(liveInstances.map(i => i.sessionFile));
-  // Also include the current mirror session
+  // Also include the current active live session
   if (mirrorActiveSessionFile) liveFiles.add(mirrorActiveSessionFile);
 
   document.querySelectorAll('.session-item').forEach(el => {
@@ -1716,7 +1718,7 @@ function updateMirrorInputState() {
   } else {
     messageInput.disabled = true;
     sendBtn.disabled = true;
-    messageInput.placeholder = isMirrorMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
+    messageInput.placeholder = isStandaloneMode ? 'Create or select a Tau tab to chat' : 'Connecting...';
     inputArea?.classList.add('mirror-readonly');
   }
   document.getElementById('command-btn')!.disabled = !hasLiveSession;
@@ -2223,7 +2225,7 @@ wsClient.connect();
 messageRenderer.renderWelcome();
 updateMirrorInputState();
 sidebar.loadSessions().then(() => {
-  if (isMirrorMode) updateMirrorLiveIndicator();
+  if (isStandaloneMode) updateMirrorLiveIndicator();
 });
 launcherPanel.init();
 
