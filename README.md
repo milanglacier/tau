@@ -1,3 +1,7 @@
+---
+status: COMPLETED
+---
+
 # Pi Tau Web Server
 
 **Browser workspace for [Pi](https://github.com/milanglacier/pi-tau-web-server) — a standalone web server that manages multiple live Pi RPC sessions in parallel.**

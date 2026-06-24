@@ -180,3 +180,22 @@ Expected validation result:
 
 - **Verdict:** Needs revision.
 - **Explanation:** The runtime changes build, typecheck, and pass the test suite, but the documentation is left inconsistent with the deleted extension files and with the stated mirror-term cleanup goal.
+
+---
+
+## Review — 2026-06-24 (follow-up)
+
+### Findings
+
+No blocking findings in the current branch diff against `main`.
+
+### Notes
+
+- The earlier README findings above appear resolved in the current branch: `README.md` no longer mentions `mirror`, `tsconfig.extensions.json`, or an `extensions/` project-structure entry.
+- The active source, tests, public assets, README, and package metadata are clean for the intended stale terms (`mirror`, `TAU_MIRROR_PORT`, `tau-mirror`, `isStandaloneMode`, `tsconfig.extensions`, and the deleted extension entrypoints), aside from the intentional historical mentions in this plan file and the `/api/sessions/switch` test that verifies the removed route returns 404.
+- Validation run: `npm run build`, `npm run typecheck`, and `npm test` all passed; `rg` checks for the stale terms in active files returned no matches.
+
+### Overall assessment
+
+- **Verdict:** Looks good.
+- **Explanation:** The refactor now consistently replaces the mirror/standalone-mode vocabulary with live-session snapshot and server-state terminology, removes the obsolete extension build surface, and keeps the changed behavior covered by tests.
