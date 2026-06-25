@@ -106,7 +106,12 @@ export async function getAvailableModels() {
     return modelListCache.models;
   }
   try {
-    const { stdout } = await execFileAsync('pi', ['--list-models'], { timeout: 30000, encoding: 'utf8' });
+    const piCommand = process.env.TAU_PI_COMMAND || 'pi';
+    const { stdout } = await execFileAsync(piCommand, ['--list-models'], {
+      timeout: 30000,
+      encoding: 'utf8',
+      ...(process.platform === 'win32' ? { shell: true, windowsHide: true } : {}),
+    });
     const models = parsePiListModels(stdout);
     modelListCache = { at: now, models };
     return models;

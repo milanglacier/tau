@@ -116,12 +116,13 @@
             <button type="button" class="input-icon-btn" id="command-btn" title="Commands" aria-label="Open commands" tabindex="-1">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg>
             </button>
-            <button type="button" class="input-icon-btn" id="attach-btn" title="Attach image — images are uploaded as binary data. Only image files are supported. To reference local files, use the file browser sidebar." aria-label="Attach image" tabindex="-1">
+            <button type="button" class="input-icon-btn" id="attach-btn" title="Attach files" aria-label="Attach files" tabindex="-1">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>
             </button>
 
-            <input type="file" id="image-input" accept="image/*" multiple style="display:none" />
+            <input type="file" id="image-input" multiple style="display:none" />
           </div>
+          <div class="slash-command-suggestions hidden" id="slash-command-suggestions"></div>
           <div class="input-bubble">
             <textarea
               id="message-input"
@@ -181,6 +182,24 @@
           <span class="settings-label">Auto-compaction</span>
           <button class="settings-toggle" id="toggle-auto-compact"></button>
         </div>
+        <div class="settings-row" id="setting-auto-retry">
+          <span class="settings-label">Auto retry</span>
+          <button class="settings-toggle" id="toggle-auto-retry"></button>
+        </div>
+        <div class="settings-row" id="setting-steering-mode">
+          <span class="settings-label">Steering mode</span>
+          <select class="settings-select" id="select-steering-mode">
+            <option value="all">All</option>
+            <option value="one-at-a-time">One at a time</option>
+          </select>
+        </div>
+        <div class="settings-row" id="setting-follow-up-mode">
+          <span class="settings-label">Follow-up mode</span>
+          <select class="settings-select" id="select-follow-up-mode">
+            <option value="all">All</option>
+            <option value="one-at-a-time">One at a time</option>
+          </select>
+        </div>
         <div class="settings-row" id="setting-thinking">
           <span class="settings-label">Thinking level</span>
           <button class="settings-value-btn" id="btn-thinking-level"></button>
@@ -237,7 +256,21 @@
     </div>
     <form class="new-live-session-body" id="new-live-session-form">
       <label class="new-live-session-label" for="new-live-session-cwd">Project directory</label>
-      <input class="new-live-session-input" id="new-live-session-cwd" type="text" placeholder="/path/to/project" autocomplete="off" required>
+      <div class="new-live-session-input-row">
+        <input class="new-live-session-input" id="new-live-session-cwd" type="text" placeholder="/path/to/project" autocomplete="off" required>
+        <button type="button" class="secondary-btn new-live-session-browse-btn" id="new-live-session-browse">Browse</button>
+      </div>
+      <div class="directory-picker hidden" id="new-live-session-directory-picker">
+        <div class="directory-picker-toolbar">
+          <button type="button" class="icon-btn" id="directory-picker-up" title="Parent directory" aria-label="Parent directory">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>
+          </button>
+          <div class="directory-picker-path" id="directory-picker-path"></div>
+          <button type="button" class="secondary-btn directory-picker-use" id="directory-picker-use">Use</button>
+        </div>
+        <div class="directory-picker-roots" id="directory-picker-roots"></div>
+        <div class="directory-picker-list" id="directory-picker-list"></div>
+      </div>
       <div class="project-chips" id="new-live-session-projects"></div>
       <label class="new-live-session-label" for="new-live-session-model">Model</label>
       <input class="new-live-session-input" id="new-live-session-model" type="text" placeholder="openai/gpt-5.5:high" autocomplete="off">

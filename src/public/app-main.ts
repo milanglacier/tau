@@ -30,6 +30,10 @@ type LiveSessionSnapshotData = {
 };
 
 type RpcEventDetail = { sessionId?: string; event?: AppEvent };
+type DirectoryBrowseItem = { name: string; path: string };
+type DirectoryBrowseData = { path: string; parent?: string | null; roots?: DirectoryBrowseItem[]; items?: DirectoryBrowseItem[] };
+type SlashCommand = { name: string; description?: string; source?: string; location?: string };
+type ParsedSlashInput = { name: string; args: string; raw: string };
 
 // Initialize components
 const wsUrl = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws';
@@ -400,6 +404,14 @@ const newLiveSessionCwd = document.getElementById('new-live-session-cwd')!;
 const newLiveSessionModel = document.getElementById('new-live-session-model')!;
 const newLiveSessionProjects = document.getElementById('new-live-session-projects');
 const newLiveSessionSubmit = document.getElementById('new-live-session-submit')!;
+const newLiveSessionBrowse = document.getElementById('new-live-session-browse')!;
+const directoryPicker = document.getElementById('new-live-session-directory-picker')!;
+const directoryPickerPath = document.getElementById('directory-picker-path')!;
+const directoryPickerRoots = document.getElementById('directory-picker-roots')!;
+const directoryPickerList = document.getElementById('directory-picker-list')!;
+const directoryPickerUp = document.getElementById('directory-picker-up')!;
+const directoryPickerUse = document.getElementById('directory-picker-use')!;
+let currentDirectoryPickerPath = '';
 
 function setLiveSessions(sessions: LiveSession[]) {
   liveSessions = sessions || [];
@@ -632,6 +644,58 @@ async function loadProjectChips() {
   } catch {}
 }
 
+function renderDirectoryPicker(data: DirectoryBrowseData) {
+  currentDirectoryPickerPath = data.path || '';
+  directoryPickerPath.textContent = currentDirectoryPickerPath;
+  directoryPickerPath.title = currentDirectoryPickerPath;
+  directoryPickerUp.toggleAttribute('disabled', !data.parent);
+  directoryPickerUp.onclick = () => { if (data.parent) loadDirectoryPicker(data.parent); };
+
+  directoryPickerRoots.innerHTML = '';
+  for (const root of data.roots || []) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'directory-root';
+    btn.textContent = root.name;
+    btn.title = root.path;
+    btn.addEventListener('click', () => loadDirectoryPicker(root.path));
+    directoryPickerRoots.appendChild(btn);
+  }
+
+  directoryPickerList.innerHTML = '';
+  if (!data.items?.length) {
+    const empty = document.createElement('div');
+    empty.className = 'directory-picker-empty';
+    empty.textContent = 'No folders';
+    directoryPickerList.appendChild(empty);
+    return;
+  }
+  for (const item of data.items) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'directory-item';
+    btn.title = item.path;
+    btn.innerHTML = `<span class="directory-item-icon">/</span><span class="directory-item-name">${escapeHtml(item.name)}</span>`;
+    btn.addEventListener('click', () => loadDirectoryPicker(item.path));
+    directoryPickerList.appendChild(btn);
+  }
+}
+
+async function loadDirectoryPicker(dirPath = '') {
+  const params = new URLSearchParams();
+  if (dirPath) params.set('path', dirPath);
+  directoryPicker.classList.remove('hidden');
+  directoryPickerList.innerHTML = '<div class="directory-picker-empty">Loading...</div>';
+  try {
+    const res = await fetch(`/api/browse-dirs${params.toString() ? `?${params.toString()}` : ''}`);
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Failed to browse folders');
+    renderDirectoryPicker(data);
+  } catch (e) {
+    directoryPickerList.innerHTML = `<div class="directory-picker-empty">${escapeHtml((e instanceof Error ? e.message : '') || 'Failed')}</div>`;
+  }
+}
+
 function openNewLiveSessionModal() {
   newLiveSessionOverlay?.classList.remove('hidden');
   newLiveSessionModal?.classList.remove('hidden');
@@ -644,12 +708,20 @@ function openNewLiveSessionModal() {
 function closeNewLiveSessionModal() {
   newLiveSessionOverlay?.classList.add('hidden');
   newLiveSessionModal?.classList.add('hidden');
+  directoryPicker.classList.add('hidden');
 }
 
 liveTabAddBtn?.addEventListener('click', openNewLiveSessionModal);
 document.getElementById('new-live-session-close')?.addEventListener('click', closeNewLiveSessionModal);
 document.getElementById('new-live-session-cancel')?.addEventListener('click', closeNewLiveSessionModal);
 newLiveSessionOverlay?.addEventListener('click', closeNewLiveSessionModal);
+newLiveSessionBrowse.addEventListener('click', () => loadDirectoryPicker(newLiveSessionCwd.value.trim()));
+directoryPickerUse.addEventListener('click', () => {
+  if (!currentDirectoryPickerPath) return;
+  newLiveSessionCwd.value = currentDirectoryPickerPath;
+  directoryPicker.classList.add('hidden');
+  newLiveSessionCwd.focus();
+});
 newLiveSessionForm?.addEventListener('submit', async (e) => {
   e.preventDefault();
   const cwd = newLiveSessionCwd.value.trim();
@@ -709,10 +781,21 @@ function handleRPCEvent(event: AppEvent, sessionId: string | null = null) {
       handleToolExecutionEnd(event);
       break;
     case 'auto_compaction_start':
+    case 'compaction_start':
       handleCompactionStart();
       break;
     case 'auto_compaction_end':
+    case 'compaction_end':
       handleCompactionEnd(event);
+      break;
+    case 'queue_update':
+      handleQueueUpdate(event, sessionId);
+      break;
+    case 'auto_retry_start':
+      setStatusMessage(`Retrying ${event.attempt || ''}`.trim(), 'Connected', Number(event.delayMs || 3000));
+      break;
+    case 'auto_retry_end':
+      setStatusMessage(event.success === false ? 'Retry failed' : 'Retry done', 'Connected', 2500);
       break;
     case 'extension_ui_request':
       handleExtensionUIRequest(event, sessionId);
@@ -742,7 +825,9 @@ function handleCompactionStart() {
 function handleCompactionEnd(event: AppEvent) {
   const indicator = document.getElementById('compaction-indicator');
   if (indicator) {
-    const summary = event.summary ? ` — ${event.summary}` : '';
+    const result = event.result as { summary?: string } | undefined;
+    const summaryText = event.summary || result?.summary;
+    const summary = summaryText ? ` — ${summaryText}` : '';
     indicator.innerHTML = `✓ Context compacted${summary}`;
     indicator.classList.add('compaction-done');
   }
@@ -979,9 +1064,43 @@ function handleExtensionUIRequest(event: AppEvent, sessionId: string | null = nu
     case 'notify':
       dialogHandler.showNotification(request);
       break;
+    case 'setStatus':
+    case 'set_status':
+      setStatusMessage(String(event.message || event.text || event.status || ''), 'Connected', Number(event.duration || 3000));
+      break;
+    case 'setWidget':
+    case 'set_widget':
+      if (event.message || event.text) messageRenderer.renderSystemMessage(String(event.message || event.text));
+      break;
+    case 'setTitle':
+    case 'set_title':
+      if (event.title) {
+        originalTitle = String(event.title);
+        if (hasFocus) document.title = originalTitle;
+      }
+      break;
+    case 'setEditorText':
+    case 'set_editor_text':
+      messageInput.value = String(event.text || event.value || '');
+      messageInput.dispatchEvent(new Event('input'));
+      messageInput.focus();
+      break;
+    case 'pasteToEditor':
+    case 'paste_to_editor':
+      insertTextAtCursor(String(event.text || event.value || ''));
+      break;
     default:
       console.warn('[App] Unknown extension UI method:', event.method);
   }
+}
+
+function insertTextAtCursor(text: string) {
+  const start = messageInput.selectionStart ?? messageInput.value.length;
+  const end = messageInput.selectionEnd ?? start;
+  messageInput.value = messageInput.value.slice(0, start) + text + messageInput.value.slice(end);
+  messageInput.selectionStart = messageInput.selectionEnd = start + text.length;
+  messageInput.dispatchEvent(new Event('input'));
+  messageInput.focus();
 }
 
 function formatToolOutput(result: unknown) {
@@ -1013,7 +1132,10 @@ messageInput.addEventListener('keydown', (e) => {
   // Enter sends, Shift+Enter inserts newline
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    sendMessage();
+    sendMessage(e.altKey ? 'follow_up' : 'steer');
+  } else if (e.key === 'Tab' && fileReferenceSuggestions.length > 0) {
+    e.preventDefault();
+    acceptFileReference(fileReferenceSuggestions[0]);
   }
 });
 
@@ -1021,6 +1143,8 @@ messageInput.addEventListener('keydown', (e) => {
 messageInput.addEventListener('input', () => {
   messageInput.style.height = 'auto';
   messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
+  updateSlashCommandSuggestions();
+  updateFileReferenceSuggestions();
 });
 
 // ═══════════════════════════════════════
@@ -1030,9 +1154,40 @@ messageInput.addEventListener('input', () => {
 const attachBtn = document.getElementById('attach-btn')!;
 const imageInput = document.getElementById('image-input')!;
 const imagePreviews = document.getElementById('image-previews')!;
+const slashCommandSuggestions = document.getElementById('slash-command-suggestions')!;
 
 let pendingImages: PendingImage[] = [];     // { data: base64, mimeType }
-let pendingFilePaths: PendingFilePath[] = [];  // { path, name, ext } — from file browser (populated by callback above)
+let pendingFilePaths: PendingFilePath[] = [];  // { path, name, ext } - file browser or uploads
+let slashCommandCacheSessionId: string | null = null;
+let slashCommandCache: SlashCommand[] = [];
+let slashCommandRequestId = 0;
+let fileReferenceSuggestions: Array<{ name: string; path: string; relativePath: string }> = [];
+let fileReferenceRequestId = 0;
+
+const TUI_BUILTIN_SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'settings', description: 'Open settings menu', source: 'builtin', location: 'Web' },
+  { name: 'model', description: 'Select model, or set model with /model provider/model[:thinking]', source: 'builtin', location: 'Web' },
+  { name: 'scoped-models', description: 'Show or set model cycling scope', source: 'builtin', location: 'Web' },
+  { name: 'export', description: 'Export session as HTML or JSONL', source: 'builtin', location: 'Web' },
+  { name: 'import', description: 'Import and resume a session JSONL file', source: 'builtin', location: 'Web' },
+  { name: 'share', description: 'Share session as a secret GitHub gist', source: 'builtin', location: 'Not available in Web' },
+  { name: 'copy', description: 'Copy last agent message to clipboard', source: 'builtin', location: 'Web' },
+  { name: 'name', description: 'Set session display name', source: 'builtin', location: 'Web' },
+  { name: 'session', description: 'Show session info and stats', source: 'builtin', location: 'Web' },
+  { name: 'changelog', description: 'Show changelog entries', source: 'builtin', location: 'TUI only' },
+  { name: 'hotkeys', description: 'Show keyboard shortcuts', source: 'builtin', location: 'Web' },
+  { name: 'fork', description: 'Create a new fork from a previous user message', source: 'builtin', location: 'Web' },
+  { name: 'clone', description: 'Duplicate the current session at the current position', source: 'builtin', location: 'Web' },
+  { name: 'tree', description: 'Show forkable session messages', source: 'builtin', location: 'Web' },
+  { name: 'trust', description: 'Save project trust decision for future sessions', source: 'builtin', location: 'Web' },
+  { name: 'login', description: 'Configure provider authentication', source: 'builtin', location: 'Not available in Web' },
+  { name: 'logout', description: 'Remove provider authentication', source: 'builtin', location: 'Not available in Web' },
+  { name: 'new', description: 'Start a new session in this Tau tab', source: 'builtin', location: 'Web' },
+  { name: 'compact', description: 'Manually compact the session context', source: 'builtin', location: 'Web' },
+  { name: 'resume', description: 'Resume a session path or focus the session sidebar', source: 'builtin', location: 'Web' },
+  { name: 'reload', description: 'Reload Web command cache and sidebar', source: 'builtin', location: 'Web' },
+  { name: 'quit', description: 'Close the current Tau tab', source: 'builtin', location: 'Web' },
+];
 
 const MAX_IMAGE_DIM = 2048;
 const VALID_MIME_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
@@ -1077,15 +1232,43 @@ function processImageFile(file: File): Promise<PendingImage> {
   });
 }
 
+function fileExt(name: string) {
+  return name.split('.').pop()?.toLowerCase() || '';
+}
+
+async function uploadAttachment(file: File) {
+  if (!activeLiveSessionId) throw new Error('Select a live Tau tab first.');
+  const params = new URLSearchParams({ sessionId: activeLiveSessionId, name: file.name || 'upload.bin' });
+  const res = await fetch(`/api/upload?${params.toString()}`, {
+    method: 'POST',
+    headers: file.type ? { 'Content-Type': file.type } : undefined,
+    body: file,
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || 'Upload failed');
+  const name = data.name || file.name || 'upload.bin';
+  pendingFilePaths.push({ path: data.path, name, ext: fileExt(name), sessionId: activeLiveSessionId, uploaded: true });
+}
+
 async function addAttachments(files: FileList | File[]) {
-  for (const file of files) {
-    if (!file.type.startsWith('image/')) continue;
+  const list = Array.from(files);
+  if (!list.length) return;
+  let uploaded = 0;
+  for (const file of list) {
     try {
-      pendingImages.push(await processImageFile(file));
+      if (file.type.startsWith('image/')) {
+        pendingImages.push(await processImageFile(file));
+      } else {
+        await uploadAttachment(file);
+        uploaded += 1;
+      }
     } catch (e) {
-      console.error('[Tau] Image processing failed:', e);
+      const msg = (e instanceof Error ? e.message : '') || 'Attachment failed';
+      flashStatusError(msg);
+      console.error('[Tau] Attachment failed:', e);
     }
   }
+  if (uploaded > 0) setStatusMessage(`Attached ${uploaded} file${uploaded === 1 ? '' : 's'}`, 'Connected', 1600);
   renderAttachmentPreviews();
 }
 
@@ -1094,6 +1277,13 @@ attachBtn.addEventListener('click', () => imageInput.click());
 imageInput.addEventListener('change', () => {
   addAttachments(imageInput.files ?? []);
   imageInput.value = '';
+});
+
+document.addEventListener('click', (e) => {
+  const target = e.target as Node | null;
+  if (!target) return;
+  if (target === messageInput || slashCommandSuggestions.contains(target)) return;
+  hideSlashSuggestions();
 });
 
 // Drag & drop on input
@@ -1108,8 +1298,9 @@ messageInput.addEventListener('paste', (e) => {
   if (!e.clipboardData) return;
   const files: File[] = [];
   for (const item of e.clipboardData.items) {
-    if (!item.type.startsWith('image/')) continue;
-    files.push(item.getAsFile() as File);
+    if (item.kind !== 'file') continue;
+    const file = item.getAsFile();
+    if (file) files.push(file);
   }
   if (files.length) addAttachments(files);
 });
@@ -1144,11 +1335,13 @@ function renderAttachmentPreviews() {
   pendingFilePaths.forEach((fp, i) => {
     const el = document.createElement('div');
     const removeBtn = makeRemoveBtn(() => {
-      const withSpace = fp.path + ' ';
-      messageInput.value = messageInput.value.includes(withSpace)
-        ? messageInput.value.replace(withSpace, '')
-        : messageInput.value.replace(fp.path, '');
-      messageInput.dispatchEvent(new Event('input'));
+      if (!fp.uploaded) {
+        const withSpace = fp.path + ' ';
+        messageInput.value = messageInput.value.includes(withSpace)
+          ? messageInput.value.replace(withSpace, '')
+          : messageInput.value.replace(fp.path, '');
+        messageInput.dispatchEvent(new Event('input'));
+      }
       pendingFilePaths.splice(i, 1);
       renderAttachmentPreviews();
     });
@@ -1179,7 +1372,7 @@ function renderAttachmentPreviews() {
       el.title = fp.path;
       const icon = document.createElement('span');
       icon.className = 'file-chip-icon';
-      icon.textContent = getFileChipIcon(fp.ext);
+      icon.textContent = getFileChipIcon(fp.name);
       const label = document.createElement('span');
       label.className = 'file-chip-name';
       label.textContent = fp.name;
@@ -1192,31 +1385,497 @@ function renderAttachmentPreviews() {
   });
 }
 
+function collectSlashCommands(value: unknown, out: SlashCommand[] = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) collectSlashCommands(item, out);
+    return out;
+  }
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string') out.push({ name: value });
+    return out;
+  }
+  const obj = value as Record<string, unknown>;
+  const rawName = obj.name || obj.command || obj.id;
+  if (typeof rawName === 'string') {
+    out.push({
+      name: rawName.replace(/^\//, ''),
+      description: typeof obj.description === 'string' ? obj.description : undefined,
+      source: typeof obj.source === 'string' ? obj.source : undefined,
+      location: typeof obj.location === 'string' ? obj.location : undefined,
+    });
+  }
+  for (const key of ['commands', 'extensionCommands', 'extension_commands', 'promptCommands', 'prompt_commands', 'skillCommands', 'skill_commands']) {
+    if (key in obj) collectSlashCommands(obj[key], out);
+  }
+  return out;
+}
+
+function uniqueSlashCommands(commands: SlashCommand[]) {
+  const seen = new Set<string>();
+  return commands
+    .map((cmd) => ({ ...cmd, name: String(cmd.name || '').replace(/^\//, '').trim() }))
+    .filter((cmd) => {
+      if (!cmd.name || seen.has(cmd.name)) return false;
+      seen.add(cmd.name);
+      return true;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function fetchSlashCommands() {
+  if (!activeLiveSessionId) return [];
+  if (slashCommandCacheSessionId === activeLiveSessionId) return slashCommandCache;
+  slashCommandCacheSessionId = activeLiveSessionId;
+  let rpcCommands: SlashCommand[] = [];
+  try {
+    const res = await fetch('/api/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'get_commands', sessionId: activeLiveSessionId }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.success === false) throw new Error(data.error || 'Failed to load commands');
+    rpcCommands = collectSlashCommands(data.data || data);
+  } catch (e) {
+    console.warn('[Tau] Failed to load Pi slash commands:', e);
+  }
+  slashCommandCache = uniqueSlashCommands([...TUI_BUILTIN_SLASH_COMMANDS, ...rpcCommands]);
+  return slashCommandCache;
+}
+
+function hideSlashSuggestions() {
+  slashCommandSuggestions.classList.add('hidden');
+  slashCommandSuggestions.innerHTML = '';
+}
+
+function renderSlashSuggestions(commands: SlashCommand[]) {
+  slashCommandSuggestions.innerHTML = '';
+  if (!commands.length) { hideSlashSuggestions(); return; }
+  slashCommandSuggestions.classList.remove('hidden');
+  for (const cmd of commands.slice(0, 8)) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'slash-command-item';
+    const tags = [cmd.source === 'builtin' ? '' : cmd.source, cmd.location].filter(Boolean).join(' / ');
+    const meta = [cmd.description, tags].filter(Boolean).join(' - ');
+    btn.innerHTML = `
+      <span class="slash-command-name">/${escapeHtml(cmd.name)}</span>
+      ${meta ? `<span class="slash-command-desc">${escapeHtml(meta)}</span>` : ''}
+    `;
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      const rest = messageInput.value.replace(/^\/\S*/, '').trimStart();
+      messageInput.value = `/${cmd.name}${rest ? ` ${rest}` : ' '}`;
+      messageInput.dispatchEvent(new Event('input'));
+      hideSlashSuggestions();
+      messageInput.focus();
+    });
+    slashCommandSuggestions.appendChild(btn);
+  }
+}
+
+async function updateSlashCommandSuggestions() {
+  const match = messageInput.value.match(/^\/(\S*)$/);
+  if (!match) { hideSlashSuggestions(); return; }
+  const query = match[1].toLowerCase();
+  const requestId = ++slashCommandRequestId;
+  try {
+    const commands = await fetchSlashCommands();
+    if (requestId !== slashCommandRequestId) return;
+    renderSlashSuggestions(commands.filter((cmd) => cmd.name.toLowerCase().includes(query)));
+  } catch {
+    hideSlashSuggestions();
+  }
+}
+
+function currentFileReferenceQuery() {
+  const caret = messageInput.selectionStart ?? messageInput.value.length;
+  const before = messageInput.value.slice(0, caret);
+  const match = before.match(/(^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  return { query: match[2] || '', start: before.length - (match[2] || '').length - 1, end: caret };
+}
+
+function renderFileReferenceSuggestions(results: Array<{ name: string; path: string; relativePath: string }>) {
+  slashCommandSuggestions.innerHTML = '';
+  fileReferenceSuggestions = results.slice(0, 8);
+  if (!fileReferenceSuggestions.length) { hideSlashSuggestions(); return; }
+  slashCommandSuggestions.classList.remove('hidden');
+  for (const file of fileReferenceSuggestions) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'slash-command-item';
+    btn.innerHTML = `
+      <span class="slash-command-name">@${escapeHtml(file.relativePath)}</span>
+      <span class="slash-command-desc">${escapeHtml(file.path)}</span>
+    `;
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      acceptFileReference(file);
+    });
+    slashCommandSuggestions.appendChild(btn);
+  }
+}
+
+async function updateFileReferenceSuggestions() {
+  const ref = currentFileReferenceQuery();
+  if (!ref || !activeLiveSessionId) {
+    fileReferenceSuggestions = [];
+    if (!messageInput.value.startsWith('/')) hideSlashSuggestions();
+    return;
+  }
+  const requestId = ++fileReferenceRequestId;
+  try {
+    const params = new URLSearchParams({ sessionId: activeLiveSessionId, q: ref.query });
+    const res = await fetch(`/api/file-search?${params.toString()}`);
+    const data = await res.json();
+    if (requestId !== fileReferenceRequestId) return;
+    if (!res.ok || data.error) throw new Error(data.error || 'File search failed');
+    renderFileReferenceSuggestions(data.results || []);
+  } catch {
+    fileReferenceSuggestions = [];
+    hideSlashSuggestions();
+  }
+}
+
+function acceptFileReference(file: { name: string; path: string; relativePath: string }) {
+  const ref = currentFileReferenceQuery();
+  if (!ref) return;
+  const label = `@${file.relativePath}`;
+  messageInput.value = messageInput.value.slice(0, ref.start) + label + ' ' + messageInput.value.slice(ref.end);
+  const nextCaret = ref.start + label.length + 1;
+  messageInput.selectionStart = messageInput.selectionEnd = nextCaret;
+  if (!pendingFilePaths.some((fp) => fp.path === file.path)) {
+    pendingFilePaths.push({ path: file.path, name: file.name, ext: fileExt(file.name), sessionId: activeLiveSessionId });
+  }
+  renderAttachmentPreviews();
+  messageInput.dispatchEvent(new Event('input'));
+  hideSlashSuggestions();
+  messageInput.focus();
+}
+
+function messageWithFileRefs(message: string, files: PendingFilePath[]) {
+  const unique = Array.from(new Map(files.map((fp) => [fp.path, fp])).values());
+  const missing = unique.filter((fp) => !message.includes(fp.path));
+  if (!missing.length) return message;
+  const refs = missing.map((fp) => `- ${fp.path}`).join('\n');
+  if (!message) return `Please read the attached file(s):\n${refs}`;
+  return `${message}\n\nAttached files:\n${refs}`;
+}
+
+function parseSlashInput(message: string): ParsedSlashInput | null {
+  const match = message.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  return {
+    name: match[1].trim().toLowerCase(),
+    args: (match[2] || '').trim(),
+    raw: message,
+  };
+}
+
+function clearComposer() {
+  messageInput.value = '';
+  messageInput.style.height = 'auto';
+  pendingImages = [];
+  pendingFilePaths = [];
+  renderAttachmentPreviews();
+  hideSlashSuggestions();
+}
+
+function firstCommandArg(args: string) {
+  const trimmed = args.trim();
+  if (!trimmed) return '';
+  const quote = trimmed[0];
+  if (quote === '"' || quote === "'") {
+    const end = trimmed.indexOf(quote, 1);
+    return end > 0 ? trimmed.slice(1, end) : trimmed.slice(1);
+  }
+  return trimmed.split(/\s+/)[0] || '';
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
+async function refreshActiveLiveSessionSnapshot() {
+  if (!activeLiveSessionId) return;
+  const res = await fetch(`/api/live-sessions/${encodeURIComponent(activeLiveSessionId)}/snapshot`);
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || 'Failed to refresh session');
+  applyLiveSessionSnapshot({ ...data, sessionId: activeLiveSessionId });
+  const active = liveSessions.find(s => s.id === activeLiveSessionId);
+  if (active) {
+    const snapshotSession = data.session || {};
+    upsertLiveSession({ ...active, ...snapshotSession, sessionFile: data.sessionFile || snapshotSession.sessionFile || active.sessionFile });
+  }
+}
+
+function showWebHotkeys() {
+  messageRenderer.renderSystemMessage([
+    'Keyboard Shortcuts',
+    '/ focus input',
+    'Enter send',
+    'Shift+Enter newline',
+    'Esc close popup or abort streaming',
+    'Attach button upload files',
+  ].join('\n'));
+}
+
+async function copyLastAssistantMessage() {
+  const data = await rpcCommand({ type: 'get_last_assistant_text' }, 'Copying...');
+  const text = data?.data?.text;
+  if (!data?.success || !text) {
+    messageRenderer.renderError(data?.error || 'No agent messages to copy yet.');
+    return;
+  }
+  await copyTextToClipboard(String(text));
+  setStatusMessage('Copied', 'Connected', 1600);
+}
+
+let lastForkMessages: Array<Record<string, unknown>> = [];
+
+function messagePreview(value: unknown) {
+  const text = typeof value === 'string'
+    ? value
+    : Array.isArray(value)
+      ? value.filter((b) => b && typeof b === 'object' && (b as { type?: string }).type === 'text').map((b) => String((b as { text?: unknown }).text || '')).join('\n')
+      : '';
+  return text.replace(/\s+/g, ' ').trim().slice(0, 100);
+}
+
+async function showSessionTree() {
+  const data = await rpcCommand({ type: 'get_fork_messages' }, 'Loading tree...');
+  const raw = data?.data?.messages || data?.data?.forkMessages || data?.data || [];
+  lastForkMessages = Array.isArray(raw) ? raw as Array<Record<string, unknown>> : [];
+  if (!lastForkMessages.length) {
+    messageRenderer.renderSystemMessage('No forkable messages found.');
+    return;
+  }
+  const lines = ['Session Tree'];
+  lastForkMessages.slice(0, 30).forEach((entry, i) => {
+    const msg = (entry.message || entry) as { content?: unknown; id?: unknown };
+    const id = String(entry.entryId || entry.id || msg.id || entry.messageId || i + 1);
+    lines.push(`${i + 1}. ${id}  ${messagePreview(entry.text || msg.content || entry.content)}`);
+  });
+  lines.push('Use /fork <number-or-id> to fork.');
+  messageRenderer.renderSystemMessage(lines.join('\n'));
+}
+
+function forkTargetFromArg(arg: string) {
+  const value = firstCommandArg(arg);
+  if (!value) return null;
+  const numeric = Number(value);
+  if (Number.isInteger(numeric) && numeric > 0 && numeric <= lastForkMessages.length) {
+    const entry = lastForkMessages[numeric - 1];
+    const msg = (entry.message || entry) as { id?: unknown };
+    return entry.entryId || entry.id || msg.id || entry.messageId || value;
+  }
+  return value;
+}
+
+async function forkSession(arg: string) {
+  const target = forkTargetFromArg(arg);
+  if (!target) {
+    await showSessionTree();
+    return;
+  }
+  const data = await rpcCommand({ type: 'fork', entryId: target }, 'Forking...');
+  if (data?.success) await refreshActiveLiveSessionSnapshot();
+}
+
+async function resumeSessionFromSlash(arg: string) {
+  const filePath = firstCommandArg(arg);
+  if (!filePath) {
+    sidebarEl.classList.remove('collapsed');
+    sessionSearchInput.focus();
+    messageRenderer.renderSystemMessage('Select a session from the sidebar, or use /resume /path/to/session.jsonl.');
+    return;
+  }
+  const res = await fetch('/api/live-sessions/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filePath }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || 'Failed to resume session');
+  upsertLiveSession(data.session);
+  await selectLiveSession(data.session.id);
+}
+
+async function importSessionFromSlash(arg: string, files: PendingFilePath[]) {
+  const fromArg = firstCommandArg(arg);
+  const filePath = fromArg || files.find((fp) => fp.ext === 'jsonl')?.path || files[0]?.path || '';
+  if (!filePath) throw new Error('Use /import /path/to/session.jsonl');
+  const data = await rpcCommand({ type: 'import_session', filePath }, 'Importing...');
+  if (data?.success && data.data?.session) {
+    upsertLiveSession(data.data.session);
+    await selectLiveSession(data.data.session.id);
+    messageRenderer.renderSystemMessage(`Imported: ${data.data.filePath}`);
+  }
+}
+
+async function showOrSetScopedModels(arg: string) {
+  const value = arg.trim();
+  if (value) {
+    await rpcCommand({ type: 'set_pi_setting', key: 'enabledModels', value: value.split(',').map(s => s.trim()).filter(Boolean) }, 'Saving...');
+    messageRenderer.renderSystemMessage('Model cycling scope saved. New Pi sessions will use it.');
+    return;
+  }
+  const data = await rpcCommand({ type: 'get_pi_settings' }, 'Loading...');
+  const models = data?.data?.settings?.enabledModels || data?.data?.settings?.models || [];
+  messageRenderer.renderSystemMessage(`Scoped models: ${Array.isArray(models) && models.length ? models.join(', ') : '(default)'}`);
+}
+
+async function trustProject(arg: string) {
+  const value = firstCommandArg(arg).toLowerCase();
+  const trusted = !(value === 'false' || value === 'no' || value === 'untrusted' || value === 'off');
+  const data = await rpcCommand({ type: 'trust_project', trusted }, 'Saving trust...');
+  if (data?.success) {
+    const state = trusted ? 'trusted' : 'untrusted';
+    messageRenderer.renderSystemMessage(`Project marked ${state}: ${data.data?.path}\nRestart or create a new Tau tab for Pi to reload trust.`);
+  }
+}
+
+async function reloadWebState() {
+  slashCommandCacheSessionId = null;
+  slashCommandCache = [];
+  await sidebar.loadSessions();
+  updateLiveSessionIndicators();
+  messageRenderer.renderSystemMessage('Reloaded Web command cache and sessions.');
+}
+
+async function handleBuiltinSlashCommand(parsed: ParsedSlashInput, files: PendingFilePath[]) {
+  const builtin = TUI_BUILTIN_SLASH_COMMANDS.find((cmd) => cmd.name === parsed.name);
+  if (!builtin) return false;
+
+  if (parsed.name !== 'import' && (pendingImages.length > 0 || files.length > 0)) {
+    flashStatusError('Slash commands do not accept attachments');
+    return true;
+  }
+
+  clearComposer();
+
+  try {
+    switch (parsed.name) {
+      case 'settings':
+        await openSettings();
+        return true;
+      case 'model':
+        if (parsed.args) await modelPickerController.applyModelSpec(parsed.args);
+        else modelPickerController.open();
+        return true;
+      case 'scoped-models':
+        await showOrSetScopedModels(parsed.args);
+        return true;
+      case 'compact':
+        await rpcCommand({ type: 'compact', customInstructions: parsed.args || undefined }, 'Compacting...');
+        return true;
+      case 'export':
+        await rpcExportHtml(firstCommandArg(parsed.args));
+        return true;
+      case 'import':
+        await importSessionFromSlash(parsed.args, files);
+        return true;
+      case 'copy':
+        await copyLastAssistantMessage();
+        return true;
+      case 'name':
+        if (parsed.args) {
+          const data = await rpcCommand({ type: 'set_session_name', name: parsed.args }, 'Renaming...');
+          if (data?.success) messageRenderer.renderSystemMessage(`Session name set: ${parsed.args}`);
+        } else {
+          const data = await rpcCommand({ type: 'get_state' }, 'Loading name...');
+          const name = data?.data?.sessionName || '(unnamed)';
+          messageRenderer.renderSystemMessage(`Session name: ${name}`);
+        }
+        return true;
+      case 'session':
+        await showSessionStats();
+        return true;
+      case 'hotkeys':
+        showWebHotkeys();
+        return true;
+      case 'tree':
+        await showSessionTree();
+        return true;
+      case 'fork':
+        await forkSession(parsed.args);
+        return true;
+      case 'trust':
+        await trustProject(parsed.args);
+        return true;
+      case 'resume':
+        await resumeSessionFromSlash(parsed.args);
+        return true;
+      case 'reload':
+        await reloadWebState();
+        return true;
+      case 'quit':
+        if (activeLiveSessionId) await closeLiveSession(activeLiveSessionId);
+        return true;
+      case 'new': {
+        const data = await rpcCommand({ type: 'new_session' }, 'Starting new session...');
+        if (data?.success) await refreshActiveLiveSessionSnapshot();
+        return true;
+      }
+      case 'clone': {
+        const data = await rpcCommand({ type: 'clone' }, 'Cloning session...');
+        if (data?.success) await refreshActiveLiveSessionSnapshot();
+        return true;
+      }
+      default:
+        messageRenderer.renderSystemMessage(`/${parsed.name} is not available in Tau Web.`);
+        return true;
+    }
+  } catch (e) {
+    messageRenderer.renderError((e instanceof Error ? e.message : '') || `/${parsed.name} failed`);
+    return true;
+  }
+}
+
 // ═══════════════════════════════════════
 // Send message (with images)
 // ═══════════════════════════════════════
 
 let messageQueue: QueuedCommand[] = [];
 
-function sendMessage() {
-  const message = messageInput.value.trim();
-  if (!message && pendingImages.length === 0) return;
+function parseShellInput(message: string) {
+  const match = message.match(/^(!{1,2})(?:\s*)([\s\S]+)$/);
+  if (!match) return null;
+  return { hidden: match[1] === '!!', command: match[2].trim() };
+}
 
-  messageInput.value = '';
-  messageInput.style.height = 'auto';
-
-  const cmd: QueuedCommand = { type: 'prompt', message: message || '(see attached image)' };
-
-  if (pendingImages.length > 0) {
-    cmd.images = pendingImages.map(img => {
-      console.log(`[Tau] Sending image: mimeType=${img.mimeType}, dataLen=${img.data?.length}`);
-      return { type: 'image', data: img.data, mimeType: img.mimeType || 'image/png' };
-    });
-    pendingImages = [];
+async function handleShellInput(shell: { hidden: boolean; command: string }) {
+  clearComposer();
+  if (!shell.command) return;
+  const type = shell.hidden ? 'local_bash' : 'bash';
+  const data = await rpcCommand({ type, command: shell.command }, shell.hidden ? 'Running hidden shell...' : 'Running shell...');
+  if (data?.success) {
+    const out = data.data?.output || '';
+    const exitCode = data.data?.exitCode ?? 0;
+    const label = shell.hidden ? 'Hidden shell' : 'Shell';
+    messageRenderer.renderSystemMessage(`${label}: ${shell.command}\nExit: ${exitCode}\n${out ? `\n${out}` : ''}`);
+    if (!shell.hidden) messageRenderer.renderSystemMessage('Shell output was added to Pi context for the next prompt.');
+  } else if (data?.error) {
+    messageRenderer.renderError(data.error);
   }
+}
 
-  pendingFilePaths = [];
-  renderAttachmentPreviews();
+function sendMessage(streamingMode: 'steer' | 'follow_up' = 'steer') {
+  const message = messageInput.value.trim();
+  const files = [...pendingFilePaths];
+  const images = [...pendingImages];
+  if (!message && images.length === 0 && files.length === 0) return;
 
   if (!activeLiveSessionId) {
     messageRenderer.renderError('Create or select a Tau tab first.');
@@ -1224,18 +1883,59 @@ function sendMessage() {
     return;
   }
 
-  cmd.sessionId = activeLiveSessionId;
-
-  if (state.isStreaming) {
-    // Queue it for the current Tau tab only; do not let tab switches retarget it.
-    messageQueue.push(cmd);
-    lastSentMessage = message;
-    renderQueuedMessages();
+  const shellInput = parseShellInput(message);
+  if (shellInput) {
+    if (images.length > 0 || files.length > 0) {
+      flashStatusError('Shell commands do not accept attachments');
+      return;
+    }
+    handleShellInput(shellInput).catch((e) => messageRenderer.renderError((e instanceof Error ? e.message : '') || 'Shell command failed'));
     return;
   }
 
-  lastSentMessage = message;
-  messageRenderer.renderUserMessage({ content: message, images: cmd.images });
+  const slashInput = parseSlashInput(message);
+  if (slashInput) {
+    handleBuiltinSlashCommand(slashInput, files).then((handled) => {
+      if (!handled) sendPromptMessage(message, files, images, streamingMode, true);
+    });
+    return;
+  }
+
+  sendPromptMessage(message, files, images, streamingMode);
+}
+
+function sendPromptMessage(message: string, files: PendingFilePath[], images: PendingImage[], streamingMode: 'steer' | 'follow_up' = 'steer', forcePromptWhileStreaming = false) {
+  clearComposer();
+
+  const finalMessage = messageWithFileRefs(message, files);
+  const cmd: QueuedCommand = { type: 'prompt', message: finalMessage || '(see attached image)' };
+
+  if (images.length > 0) {
+    cmd.images = images.map(img => {
+      console.log(`[Tau] Sending image: mimeType=${img.mimeType}, dataLen=${img.data?.length}`);
+      return { type: 'image', data: img.data, mimeType: img.mimeType || 'image/png' };
+    });
+  }
+
+  cmd.sessionId = activeLiveSessionId || undefined;
+
+  if (state.isStreaming) {
+    if (forcePromptWhileStreaming) {
+      wsClient.send(cmd);
+      return;
+    }
+    cmd.type = streamingMode === 'follow_up' ? 'follow_up' : 'steer';
+    cmd.label = streamingMode === 'follow_up' ? 'Follow-up' : 'Steer';
+    cmd.remote = true;
+    messageQueue.push(cmd);
+    lastSentMessage = cmd.message ?? null;
+    renderQueuedMessages();
+    wsClient.send(cmd);
+    return;
+  }
+
+  lastSentMessage = cmd.message ?? null;
+  messageRenderer.renderUserMessage({ content: cmd.message, images: cmd.images });
   wsClient.send(cmd);
 }
 
@@ -1253,17 +1953,33 @@ function renderQueuedMessages() {
     const el = document.createElement('div');
     el.className = 'queued-msg';
     el.innerHTML = `
-      <span class="queued-msg-label">Queued</span>
+      <span class="queued-msg-label">${escapeHtml(cmd.label || 'Queued')}</span>
       <span class="queued-msg-text">${escapeHtml(cmd.message || '')}</span>
       <button class="queued-msg-cancel" title="Cancel">×</button>
     `;
     el.querySelector('.queued-msg-cancel')?.addEventListener('click', () => {
       messageQueue.splice(i, 1);
       renderQueuedMessages();
+      if (cmd.remote) wsClient.send({ type: 'abort', sessionId: activeLiveSessionId });
     });
     queuedMessagesEl.appendChild(el);
   });
   queuedMessagesEl.classList.toggle('hidden', queuedMessagesEl.children.length === 0);
+}
+
+function handleQueueUpdate(event: AppEvent, sessionId: string | null = null) {
+  const targetSessionId = sessionId || activeLiveSessionId || undefined;
+  if (!targetSessionId) return;
+  const steering = Array.isArray(event.steering) ? event.steering : [];
+  const followUp = Array.isArray(event.followUp) ? event.followUp : [];
+  messageQueue = messageQueue.filter((cmd) => cmd.sessionId !== targetSessionId || !cmd.remote);
+  for (const msg of steering) {
+    messageQueue.push({ type: 'steer', label: 'Steer', message: String(msg), sessionId: targetSessionId, remote: true });
+  }
+  for (const msg of followUp) {
+    messageQueue.push({ type: 'follow_up', label: 'Follow-up', message: String(msg), sessionId: targetSessionId, remote: true });
+  }
+  renderQueuedMessages();
 }
 
 function escapeHtml(text: string) {
@@ -1274,7 +1990,7 @@ function escapeHtml(text: string) {
 
 function flushQueue() {
   if (!activeLiveSessionId || state.isStreaming) return;
-  const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId);
+  const idx = messageQueue.findIndex(cmd => cmd.sessionId === activeLiveSessionId && !cmd.remote);
   if (idx >= 0) {
     const [cmd] = messageQueue.splice(idx, 1);
     lastSentMessage = cmd.message ?? null;
@@ -1302,7 +2018,7 @@ const commandPaletteController = setupCommandPalette([
 
 async function rpcCommand(cmd: RpcCommand, statusMsg = '') {
   try {
-    const backendLocalCommands = new Set(['get_auth', 'set_auth', 'get_available_models']);
+    const backendLocalCommands = new Set(['get_auth', 'set_auth', 'get_available_models', 'get_pi_settings', 'set_pi_setting', 'import_session']);
     const needsLiveSession = !cmd.sessionId && !cmd.filePath && !backendLocalCommands.has(cmd.type);
     if (needsLiveSession && (!viewingActiveSession || !activeLiveSessionId)) {
       const error = 'Select a live Tau tab first.';
@@ -1328,10 +2044,12 @@ async function rpcCommand(cmd: RpcCommand, statusMsg = '') {
   }
 }
 
-async function rpcExportHtml() {
-  const data = await rpcCommand({ type: 'export_html' }, 'Exporting...');
+async function rpcExportHtml(outputPath = '') {
+  const cmd: RpcCommand = outputPath ? { type: 'export_html', outputPath } : { type: 'export_html' };
+  const data = await rpcCommand(cmd, 'Exporting...');
   if (data?.success && data.data?.path) {
     setStatusMessage(`Exported: ${data.data.path}`, 'Connected', 4000);
+    messageRenderer.renderSystemMessage(`Exported: ${data.data.path}`);
   }
 }
 
@@ -1341,9 +2059,12 @@ async function showSessionStats() {
     const s = data.data;
     const lines = [
       `📊 Session Stats`,
+      s.sessionName ? `Name: ${s.sessionName}` : '',
+      s.sessionFile ? `File: ${s.sessionFile}` : '',
+      s.sessionId ? `ID: ${s.sessionId}` : '',
       `Messages: ${s.totalMessages} (${s.userMessages} user, ${s.assistantMessages} assistant)`,
       `Tool calls: ${s.toolCalls}`,
-    ];
+    ].filter(Boolean);
     if (s.tokens) {
       lines.push(`Context: ~${(s.tokens.input / 1000).toFixed(1)}k tokens`);
     }
@@ -1370,6 +2091,10 @@ document.addEventListener('keydown', (e) => {
   // Escape — Abort streaming, or close sidebar on mobile
   if (e.key === 'Escape') {
     // Close palettes/panels first
+    if (!slashCommandSuggestions.classList.contains('hidden')) {
+      hideSlashSuggestions();
+      return;
+    }
     if (modelPickerController.closeIfOpen()) return;
     if (!settingsPanel.classList.contains('hidden')) {
       closeSettings();
@@ -1770,6 +2495,11 @@ function renderSessionHistory(entries: SessionHistoryEntry[]) {
         { content: (msg.content as MessageContentBlock[]) || [] },
         msg.isError ?? false
       );
+    } else if (msg.role === 'bashExecution') {
+      const command = String((msg as AppMessage & { command?: unknown }).command || '');
+      const output = String((msg as AppMessage & { output?: unknown }).output || '');
+      const exitCode = (msg as AppMessage & { exitCode?: unknown }).exitCode ?? 0;
+      messageRenderer.renderSystemMessage(`Shell: ${command}\nExit: ${exitCode}\n${output}`);
     }
   }
 
@@ -1939,6 +2669,9 @@ const themeGrid = document.getElementById('theme-grid')!;
 
 
 const toggleAutoCompact = document.getElementById('toggle-auto-compact')!;
+const toggleAutoRetry = document.getElementById('toggle-auto-retry')!;
+const selectSteeringMode = document.getElementById('select-steering-mode')!;
+const selectFollowUpMode = document.getElementById('select-follow-up-mode')!;
 const btnThinkingLevel = document.getElementById('btn-thinking-level')!;
 const toggleShowThinking = document.getElementById('toggle-show-thinking')!;
 
@@ -1980,6 +2713,9 @@ async function openSettings() {
       const s = data.data;
       // Auto-compaction toggle
       toggleAutoCompact.className = `settings-toggle${s.autoCompactionEnabled ? ' on' : ''}`;
+      toggleAutoRetry.className = `settings-toggle${s.autoRetryEnabled !== false ? ' on' : ''}`;
+      selectSteeringMode.value = s.steeringMode || 'one-at-a-time';
+      selectFollowUpMode.value = s.followUpMode || 'one-at-a-time';
       // Thinking level
       btnThinkingLevel.textContent = s.thinkingLevel || 'off';
       modelPickerController.setThinkingLevel(s.thinkingLevel || 'off');
@@ -2017,6 +2753,20 @@ toggleAutoCompact.addEventListener('click', async () => {
   const isOn = toggleAutoCompact.classList.contains('on');
   toggleAutoCompact.className = `settings-toggle${isOn ? '' : ' on'}`;
   await rpcCommand({ type: 'set_auto_compaction', enabled: !isOn });
+});
+
+toggleAutoRetry.addEventListener('click', async () => {
+  const isOn = toggleAutoRetry.classList.contains('on');
+  toggleAutoRetry.className = `settings-toggle${isOn ? '' : ' on'}`;
+  await rpcCommand({ type: 'set_auto_retry', enabled: !isOn });
+});
+
+selectSteeringMode.addEventListener('change', async () => {
+  await rpcCommand({ type: 'set_steering_mode', mode: selectSteeringMode.value });
+});
+
+selectFollowUpMode.addEventListener('change', async () => {
+  await rpcCommand({ type: 'set_follow_up_mode', mode: selectFollowUpMode.value });
 });
 
 // Thinking level cycle (settings panel button)

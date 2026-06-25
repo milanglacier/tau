@@ -11,7 +11,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { spawn, execFile } = require('node:child_process');
+const { spawn, execFile, exec } = require('node:child_process');
 const readline = require('node:readline');
 const { WebSocketServer, WebSocket } = require('ws');
 
@@ -72,6 +72,30 @@ function readBody(req: IncomingMessage): Promise<RpcCommand> {
       try { resolve(body ? JSON.parse(body) as RpcCommand : {}); } catch (e) { reject(e); }
     });
     req.on('error', reject);
+  });
+}
+
+function streamUpload(req: IncomingMessage, filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    let bytes = 0;
+    let settled = false;
+    const out = fs.createWriteStream(filePath, { flags: 'wx' });
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try { out.destroy(); } catch {}
+      try { fs.rmSync(filePath, { force: true }); } catch {}
+      reject(err);
+    };
+    req.on('data', (chunk: Buffer) => { bytes += chunk.length; });
+    req.on('error', fail);
+    out.on('error', fail);
+    out.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve(bytes);
+    });
+    req.pipe(out);
   });
 }
 
@@ -152,6 +176,41 @@ async function refreshSessionModel(session: PiRpcSession | null | undefined) {
   liveManager.broadcastUpdated(session.id);
 }
 
+function rpcData(resp: RpcResponse | null | undefined) {
+  return (resp && (resp.data || resp.result || resp)) as JsonRecord;
+}
+
+function entriesFromRpcMessages(messages: unknown) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .map((entry) => {
+      if (entry && typeof entry === 'object' && (entry as JsonRecord).type === 'message' && (entry as JsonRecord).message) return entry as JsonRecord;
+      if (entry && typeof entry === 'object' && (entry as JsonRecord).role) return { type: 'message', message: entry as JsonRecord };
+      return null;
+    })
+    .filter(Boolean) as JsonRecord[];
+}
+
+async function syncSessionStateFromPi(session: PiRpcSession | null | undefined) {
+  if (!session || session.terminating) return;
+  const stateResp = await session.send({ type: 'get_state' }, { timeoutMs: 5000 });
+  const state = rpcData(stateResp);
+  if (state.sessionFile !== undefined) session.sessionFile = state.sessionFile ? String(state.sessionFile) : null;
+  if (state.sessionName !== undefined) session.setSessionName(state.sessionName);
+  if (state.model !== undefined) session.model = normalizeModel(state.model);
+  if (state.thinkingLevel) session.thinkingLevel = String(state.thinkingLevel);
+  if (state.isStreaming !== undefined) session.isStreaming = !!state.isStreaming;
+  if (state.autoCompactionEnabled !== undefined) session.autoCompactionEnabled = !!state.autoCompactionEnabled;
+  if (state.autoRetryEnabled !== undefined) session.autoRetryEnabled = !!state.autoRetryEnabled;
+  if (typeof state.steeringMode === 'string') session.steeringMode = state.steeringMode;
+  if (typeof state.followUpMode === 'string') session.followUpMode = state.followUpMode;
+
+  const messagesResp = await session.send({ type: 'get_messages' }, { timeoutMs: 5000 });
+  const messagesData = rpcData(messagesResp);
+  session.entries = entriesFromRpcMessages(messagesData.messages || messagesData.entries);
+  liveManager.broadcastUpdated(session.id);
+}
+
 async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
   const id = command.id;
   const cmd = command.type;
@@ -177,34 +236,72 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     return success({ enabled: authEnabled });
   }
   if (cmd === 'get_available_models') return success({ models: await getAvailableModels() });
+  if (cmd === 'get_pi_settings') return success({ settings: loadPiSettings() });
+  if (cmd === 'set_pi_setting') {
+    if (typeof command.key !== 'string') return error('key required');
+    try { return success({ settings: savePiSetting(command.key, command.value) }); } catch (e) { return error(errorMessage(e)); }
+  }
   if (cmd === 'set_session_name') {
     const name = (command.name || '').trim();
     if (!name) return error('Name cannot be empty');
     const session = command.sessionId ? liveManager.get(command.sessionId) : null;
+    if (session) {
+      try {
+        const resp = await session.send({ type: 'set_session_name', name }, { timeoutMs: 5000 });
+        if (resp.success === false) return error(String(resp.error || 'Failed to set session name'));
+      } catch (e) {
+        return error(errorMessage(e));
+      }
+      updateLiveSessionName(session, name);
+      return success({ name });
+    }
     let resolvedFile = null;
-    const targetFile = command.filePath || session?.sessionFile;
+    const targetFile = command.filePath;
     if (targetFile) {
       try { resolvedFile = appendSessionName(targetFile, name); } catch (e) { return error(errorMessage(e)); }
     }
     const matchingLive = resolvedFile
       ? Array.from(liveManager.sessions.values()).find((s) => s.sessionFile && path.resolve(s.sessionFile) === resolvedFile)
       : null;
-    if (session) updateLiveSessionName(session, name);
-    else if (matchingLive) updateLiveSessionName(matchingLive, name);
+    if (matchingLive) updateLiveSessionName(matchingLive, name);
     else if (!resolvedFile) return error('sessionId or filePath required');
     return success({ name });
   }
 
   const session = command.sessionId ? liveManager.get(command.sessionId) : null;
+  if (cmd === 'import_session') {
+    try {
+      const imported = importSessionFile(String(command.filePath || command.path || ''), session?.cwd || null);
+      const cwd = normalizeSessionCwd(command.cwd) || normalizeSessionCwd(imported.cwd) || session?.cwd || null;
+      if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+        throw new Error('Cannot import session because its project directory no longer exists');
+      }
+      const entries = readSessionEntries(imported.filePath) as JsonRecord[];
+      const sessionName = deriveSessionNameFromEntries(entries);
+      const live = await liveManager.resume({ sessionFile: imported.filePath, cwd, model: String(command.model || ''), entries, sessionName });
+      return success({ ...imported, session: live.metadata() });
+    } catch (e) { return error(errorMessage(e)); }
+  }
   if (cmd === 'export_html') {
     try {
       if (command.sessionId && !session) throw new Error('Live session not found');
       const sf = command.filePath ? resolveSessionFile(command.filePath) : session?.sessionFile;
       if (!sf) throw new Error('No session file to export yet');
+      if (command.outputPath && path.extname(String(command.outputPath)).toLowerCase() === '.jsonl') {
+        const result = resolveExportOutputPath(command.outputPath, sf, ['.jsonl']);
+        fs.copyFileSync(sf, result);
+        return success({ path: result });
+      }
       const args = ['--export', sf];
-      if (command.outputPath) args.push(resolveExportOutputPath(command.outputPath, sf));
+      if (command.outputPath) args.push(resolveExportOutputPath(command.outputPath, sf, ['.html']));
       const output = await new Promise<string>((resolve, reject) => {
-        execFile('pi', args, { cwd: session?.cwd || path.dirname(sf), timeout: 30000, encoding: 'utf8' }, (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => {
+        const piCommand = process.env.TAU_PI_COMMAND || 'pi';
+        execFile(piCommand, args, {
+          cwd: session?.cwd || path.dirname(sf),
+          timeout: 30000,
+          encoding: 'utf8',
+          ...(process.platform === 'win32' ? { shell: true, windowsHide: true } : {}),
+        }, (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => {
           if (err) reject(new Error(stderr || err.message)); else resolve(stdout);
         });
       });
@@ -217,6 +314,15 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
 
   if (!session) return error('No active Tau session. Create or select an in-page Tau tab first.');
 
+  if (cmd === 'trust_project') {
+    try {
+      const trusted = command.trusted !== false && command.value !== false && command.mode !== 'false' && command.mode !== 'untrusted';
+      return success({ ...setProjectTrust(session.cwd, trusted), needsRestart: true });
+    } catch (e) { return error(errorMessage(e)); }
+  }
+  if (cmd === 'local_bash') {
+    try { return success(await runLocalShell(String(command.command || ''), session.cwd)); } catch (e) { return error(errorMessage(e)); }
+  }
   if (cmd === 'get_state') {
     return success({
       model: session.model,
@@ -224,14 +330,27 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
       isStreaming: session.isStreaming,
       sessionFile: session.sessionFile,
       sessionName: session.sessionName,
-      autoCompactionEnabled: true,
+      autoCompactionEnabled: session.autoCompactionEnabled,
+      autoRetryEnabled: session.autoRetryEnabled,
+      steeringMode: session.steeringMode,
+      followUpMode: session.followUpMode,
+      messageCount: session.entries.length,
     });
   }
   if (cmd === 'get_messages') return success({ entries: session.entries });
   if (cmd === 'live_session_snapshot_request') return { type: 'live_session_snapshot', sessionId: session.id, ...session.snapshot() };
-  if (cmd === 'set_auto_compaction') return success({ enabled: !!command.enabled });
 
-  const native = new Set(['prompt', 'steer', 'follow_up', 'abort', 'compact', 'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level', 'get_session_stats', 'extension_ui_response']);
+  const native = new Set([
+    'prompt', 'steer', 'follow_up', 'abort',
+    'compact', 'set_auto_compaction',
+    'set_auto_retry', 'abort_retry',
+    'bash', 'abort_bash',
+    'set_model', 'cycle_model', 'set_thinking_level', 'cycle_thinking_level',
+    'set_steering_mode', 'set_follow_up_mode',
+    'get_session_stats', 'get_commands', 'extension_ui_response',
+    'new_session', 'switch_session', 'fork', 'clone',
+    'get_fork_messages', 'get_last_assistant_text',
+  ]);
   if (!native.has(cmd ?? '')) return error(`Unknown command: ${cmd}`);
 
   // `set_thinking_level` is forwarded to pi but pi's response carries no
@@ -259,6 +378,15 @@ async function handleRpcCommand(command: RpcCommand): Promise<RpcResponse> {
     // NOT block this HTTP response — return the original ack first.
     if (resp.success !== false && (cmd === 'prompt' || cmd === 'steer' || cmd === 'follow_up')) {
       refreshSessionModel(session).catch(() => {});
+    }
+    if (resp.success !== false) {
+      if (cmd === 'set_auto_compaction') session.autoCompactionEnabled = !!command.enabled;
+      if (cmd === 'set_auto_retry') session.autoRetryEnabled = !!command.enabled;
+      if (cmd === 'set_steering_mode' && typeof command.mode === 'string') session.steeringMode = command.mode;
+      if (cmd === 'set_follow_up_mode' && typeof command.mode === 'string') session.followUpMode = command.mode;
+    }
+    if (resp.success !== false && (cmd === 'new_session' || cmd === 'switch_session' || cmd === 'fork' || cmd === 'clone')) {
+      await syncSessionStateFromPi(session);
     }
     return { ...resp, success: resp.success !== false };
   } catch (e) {
@@ -379,8 +507,24 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   }
 
   if (cleanPath === '/api/projects' && req.method === 'GET') return serveProjectsList(res);
+  if (cleanPath === '/api/browse-dirs' && req.method === 'GET') return serveDirectoryBrowse(res, parsed.searchParams.get('path'));
   if (cleanPath === '/api/sessions' && req.method === 'GET') return serveSessionsList(res);
   if (cleanPath.startsWith('/api/search') && req.method === 'GET') return serveSearch(res, parsed.searchParams.get('q') || '');
+  if (cleanPath === '/api/upload' && req.method === 'POST') {
+    const sessionId = parsed.searchParams.get('sessionId');
+    const session = sessionId ? liveManager.get(sessionId) : null;
+    if (!session) return json(res, sessionId ? 404 : 400, { error: sessionId ? 'Live session not found' : 'No live session selected' });
+    try {
+      const uploadDir = path.join(fs.realpathSync(path.resolve(session.cwd)), '.tau-uploads');
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const name = safeUploadName(parsed.searchParams.get('name') || 'upload.bin');
+      const filePath = uniqueUploadPath(uploadDir, name);
+      streamUpload(req, filePath)
+        .then((size) => json(res, 200, { path: filePath, name: path.basename(filePath), size }))
+        .catch((e) => json(res, 500, { error: errorMessage(e) }));
+    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
+    return;
+  }
   if ((cleanPath === '/api/files') && req.method === 'GET') {
     const explicitPath = parsed.searchParams.get('path');
     const sessionId = parsed.searchParams.get('sessionId');
@@ -390,6 +534,15 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
     try {
       const dirPath = resolveLiveSessionPath(session, explicitPath || session.cwd);
       return serveFileList(res, dirPath);
+    } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
+  }
+  if (cleanPath === '/api/file-search' && req.method === 'GET') {
+    const sessionId = parsed.searchParams.get('sessionId');
+    if (!sessionId) return json(res, 400, { error: 'No live session selected' });
+    const session = liveManager.get(sessionId);
+    if (!session) return json(res, 404, { error: 'Live session not found' });
+    try {
+      return serveFileSearch(res, session, parsed.searchParams.get('q') || '');
     } catch (e) { return json(res, errorStatus(e), { error: errorMessage(e) }); }
   }
   if (cleanPath === '/api/file/preview' && req.method === 'GET') {
@@ -440,6 +593,121 @@ function liveFilesSet() {
 
 function normalizeSessionCwd(cwd: unknown) {
   return typeof cwd === 'string' && cwd.trim() ? path.resolve(expandHome(cwd)) : null;
+}
+
+function sessionDirNameForCwd(cwd: string) {
+  const normalized = path.resolve(cwd).replace(/\\/g, '/');
+  const encoded = normalized.replace(/\//g, '--').replace(/:/g, '').replace(/[^A-Za-z0-9._-]/g, '_');
+  return encoded || '--imported';
+}
+
+function uniqueSessionImportPath(projectDir: string, sourceName: string) {
+  const ext = path.extname(sourceName).toLowerCase() === '.jsonl' ? '.jsonl' : '';
+  const stem = (path.basename(sourceName, path.extname(sourceName)) || 'imported-session')
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 120);
+  let target = path.join(projectDir, `${stem}${ext || '.jsonl'}`);
+  let n = 1;
+  while (fs.existsSync(target)) {
+    target = path.join(projectDir, `${stem}-${n}.jsonl`);
+    n += 1;
+  }
+  return target;
+}
+
+function readSessionHeader(filePath: string) {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const buffer = Buffer.alloc(64 * 1024);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const text = buffer.toString('utf8', 0, bytesRead);
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const entry = JSON.parse(line);
+      if (entry?.type === 'session') return entry as JsonRecord;
+    }
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch {}
+    }
+  }
+  return null;
+}
+
+function importSessionFile(inputPath: string, fallbackCwd?: string | null) {
+  if (!inputPath || typeof inputPath !== 'string') throw new Error('filePath required');
+  const source = path.resolve(expandHome(inputPath));
+  if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('Import file not found');
+  if (path.extname(source).toLowerCase() !== '.jsonl') throw new Error('Only .jsonl session files can be imported');
+
+  const sessionRoot = path.resolve(SESSIONS_DIR);
+  if (isWithinPath(sessionRoot, source)) {
+    const filePath = resolveSessionFile(source);
+    return { filePath, cwd: readSessionHeaderCwd(filePath) || fallbackCwd || null, copied: false };
+  }
+
+  const header = readSessionHeader(source);
+  if (!header?.id) throw new Error('Import file is not a Pi session JSONL');
+  const cwd = normalizeSessionCwd(header.cwd) || normalizeSessionCwd(fallbackCwd) || path.dirname(source);
+  const projectDir = path.join(SESSIONS_DIR, sessionDirNameForCwd(cwd));
+  fs.mkdirSync(projectDir, { recursive: true });
+  const target = uniqueSessionImportPath(projectDir, path.basename(source));
+  fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+  return { filePath: target, cwd, copied: true };
+}
+
+function readJsonFile(filePath: string) {
+  try { return JSON.parse(fs.readFileSync(filePath, 'utf8')) as JsonRecord; } catch { return {}; }
+}
+
+function writeJsonFile(filePath: string, value: unknown) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + '\n');
+}
+
+function loadPiSettings() {
+  return readJsonFile(path.join(PI_AGENT_DIR, 'settings.json'));
+}
+
+function savePiSetting(key: string, value: unknown) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(key)) throw new Error('Invalid setting key');
+  const settingsPath = path.join(PI_AGENT_DIR, 'settings.json');
+  const settings = loadPiSettings();
+  settings[key] = value;
+  writeJsonFile(settingsPath, settings);
+  return settings;
+}
+
+function setProjectTrust(cwd: string, trusted: boolean) {
+  const resolved = fs.realpathSync(path.resolve(cwd));
+  const trustPath = path.join(PI_AGENT_DIR, 'trust.json');
+  const trust = readJsonFile(trustPath);
+  trust[resolved] = trusted;
+  writeJsonFile(trustPath, trust);
+  return { path: resolved, trusted };
+}
+
+function runLocalShell(command: string, cwd: string): Promise<JsonRecord> {
+  if (!command || typeof command !== 'string') return Promise.reject(new Error('command required'));
+  return new Promise((resolve) => {
+    exec(command, {
+      cwd,
+      timeout: 60000,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+    }, (err: NodeJS.ErrnoException | null, stdout: string, stderr: string) => {
+      const output = `${stdout || ''}${stderr || ''}`;
+      resolve({
+        output,
+        exitCode: typeof err?.code === 'number' ? err.code : 0,
+        cancelled: !!(err as { killed?: boolean } | null)?.killed,
+        truncated: false,
+      });
+    });
+  });
 }
 
 function readSessionEntries(filePath: string): unknown[] {
@@ -547,6 +815,83 @@ function serveProjectsList(res: ServerResponse) {
   } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
+function directoryRoots() {
+  const roots: Array<{ name: string; path: string }> = [];
+  const seen = new Set<string>();
+  const addRoot = (name: string, rootPath: string) => {
+    try {
+      const resolved = path.resolve(expandHome(rootPath));
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) return;
+      const real = fs.realpathSync(resolved);
+      if (seen.has(real)) return;
+      seen.add(real);
+      roots.push({ name, path: real });
+    } catch {}
+  };
+  if (process.platform === 'win32') {
+    for (let c = 65; c <= 90; c++) {
+      const drive = `${String.fromCharCode(c)}:\\`;
+      if (fs.existsSync(drive)) addRoot(drive, drive);
+    }
+    addRoot('Home', os.homedir());
+  } else {
+    addRoot('/', '/');
+    addRoot('Home', os.homedir());
+  }
+  addRoot('Server cwd', process.cwd());
+  return roots;
+}
+
+function resolveBrowseDirectory(requestedPath: string | null) {
+  const fallback = os.homedir() || process.cwd();
+  const requested = requestedPath && requestedPath.trim() ? requestedPath : fallback;
+  const resolved = path.resolve(expandHome(requested));
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return fs.realpathSync(resolved);
+  return fs.realpathSync(path.resolve(fallback));
+}
+
+function serveDirectoryBrowse(res: ServerResponse, requestedPath: string | null) {
+  try {
+    const dirPath = resolveBrowseDirectory(requestedPath);
+    const parentPath = path.dirname(dirPath);
+    const parent = parentPath === dirPath ? null : parentPath;
+    const items = [];
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const fullPath = path.join(dirPath, entry.name);
+        fs.accessSync(fullPath, fs.constants.R_OK);
+        items.push({ name: entry.name, path: fullPath });
+      } catch {}
+    }
+    items.sort((a, b) => a.name.localeCompare(b.name));
+    json(res, 200, { path: dirPath, parent, roots: directoryRoots(), items });
+  } catch (e) { json(res, 400, { error: errorMessage(e) }); }
+}
+
+function safeUploadName(name: string) {
+  const base = String(name || 'upload.bin').split(/[\\/]/).pop() || 'upload.bin';
+  const cleaned = base
+    .replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+  if (!cleaned || cleaned === '.' || cleaned === '..') return 'upload.bin';
+  return cleaned;
+}
+
+function uniqueUploadPath(uploadDir: string, name: string) {
+  const ext = path.extname(name);
+  const stem = path.basename(name, ext) || 'upload';
+  let target = path.join(uploadDir, name);
+  let n = 1;
+  while (fs.existsSync(target)) {
+    target = path.join(uploadDir, `${stem}-${n}${ext}`);
+    n += 1;
+  }
+  return target;
+}
+
 async function serveSessionsList(res: ServerResponse) {
   try {
     if (!fs.existsSync(SESSIONS_DIR)) return json(res, 200, { projects: [] });
@@ -638,6 +983,36 @@ function serveFileList(res: ServerResponse, dirPath: string) {
   } catch (e) { json(res, 500, { error: errorMessage(e) }); }
 }
 
+function serveFileSearch(res: ServerResponse, session: PiRpcSession, query: string) {
+  const root = fs.realpathSync(path.resolve(session.cwd));
+  const needle = String(query || '').replace(/^@/, '').toLowerCase();
+  const results: Array<{ name: string; path: string; relativePath: string }> = [];
+  let scanned = 0;
+  const walk = (dirPath: string, depth: number) => {
+    if (results.length >= 30 || scanned > 8000 || depth > 10) return;
+    let entries: Dirent[] = [];
+    try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      if (results.length >= 30 || scanned > 8000) return;
+      if (entry.name.startsWith('.') && entry.name !== '.env') continue;
+      if (IGNORED_NAMES.has(entry.name)) continue;
+      const fullPath = path.join(dirPath, entry.name);
+      const rel = path.relative(root, fullPath).replace(/\\/g, '/');
+      if (entry.isDirectory()) {
+        walk(fullPath, depth + 1);
+        continue;
+      }
+      scanned += 1;
+      if (!needle || rel.toLowerCase().includes(needle)) {
+        results.push({ name: entry.name, path: fullPath, relativePath: rel });
+      }
+    }
+  };
+  walk(root, 0);
+  results.sort((a, b) => a.relativePath.length - b.relativePath.length || a.relativePath.localeCompare(b.relativePath));
+  json(res, 200, { root, results: results.slice(0, 20) });
+}
+
 function serveFilePreview(res: ServerResponse, filePath: string) {
   if (!filePath) return json(res, 400, { error: 'path required' });
   const mimes: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', ico: 'image/x-icon' };
@@ -666,14 +1041,15 @@ function resolveExportedSessionPath(filePath: string) {
   return resolved;
 }
 
-function resolveExportOutputPath(outputPath: string, sessionFile: string) {
+function resolveExportOutputPath(outputPath: string, sessionFile: string, allowedExts = ['.html']) {
   if (!outputPath || typeof outputPath !== 'string') throw new Error('outputPath required');
   const sessionDir = path.dirname(path.resolve(sessionFile));
   const sessionDirReal = fs.realpathSync(sessionDir);
   const expanded = expandHome(outputPath);
   const resolved = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(sessionDir, expanded);
-  if (!isWithinPath(sessionDir, resolved) || path.extname(resolved).toLowerCase() !== '.html') {
-    const err = new Error('Export outputPath must be an .html file in the session directory') as StatusError;
+  const ext = path.extname(resolved).toLowerCase();
+  if (!isWithinPath(sessionDir, resolved) || !allowedExts.includes(ext)) {
+    const err = new Error(`Export outputPath must be a ${allowedExts.join(' or ')} file in the session directory`) as StatusError;
     err.status = 403;
     throw err;
   }

@@ -167,7 +167,7 @@ export class SessionSidebar {
           <div class="session-title" title="${this.escapeHtml(title)}">${this.escapeHtml(title)}</div>
         </div>
         <div class="search-snippet">${this.highlightMatch(snippet, this.searchQuery)}</div>
-        <div class="session-meta">${time}${matchCount > 1 ? ` · ${matchCount} matches` : ''}</div>
+        <div class="session-meta">${time}${matchCount > 1 ? ` - ${matchCount} matches` : ''}</div>
       `;
 
       // Find the matching project/session to pass to onSessionSelect
