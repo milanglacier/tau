@@ -33,7 +33,6 @@
     "test": "npm run build && node --test"
   },
   "dependencies": {
-    "qrcode": "^1.5.0",
     "ws": "^8.16.0"
   },
   "peerDependencies": {
@@ -42,7 +41,6 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@types/node": "^26.0.0",
-    "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.1",
     "typescript": "^6.0.3"
   }

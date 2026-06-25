@@ -247,14 +247,6 @@ test('same-origin POST /api/rpc proxies to handleRpcCommand', async () => {
   assert.equal(body.data.configured, false);
 });
 
-test('GET /api/qr returns HTML once the server URL is known', async () => {
-  const res = await fetch(`${base}/api/qr`);
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get('content-type'), 'text/html');
-  const text = await res.text();
-  assert.match(text, /<img/);
-});
-
 test('GET /api/sessions returns an empty project list when no sessions exist', async () => {
   const res = await fetch(`${base}/api/sessions`);
   assert.equal(res.status, 200);

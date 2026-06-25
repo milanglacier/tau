@@ -14,7 +14,6 @@ const os = require('node:os');
 const { spawn, execFile } = require('node:child_process');
 const readline = require('node:readline');
 const { WebSocketServer, WebSocket } = require('ws');
-const QRCode = require('qrcode');
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Stats, Dirent } from 'node:fs';
@@ -331,7 +330,6 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   const cleanPath = parsed.pathname;
 
   if (cleanPath === '/api/health') return json(res, 200, { status: 'ok', role: 'rpc-session-manager', liveSessionCount: liveManager.sessions.size, lanUrl, tailscaleUrl: tailscaleUrl || undefined, platform: process.platform });
-  if (cleanPath === '/api/qr') return serveQr(res);
   if (cleanPath === '/api/live-sessions' && req.method === 'GET') return json(res, 200, { sessions: liveManager.list() });
   if (cleanPath === '/api/live-sessions' && req.method === 'POST') {
     readBody(req).then(async (body) => {
@@ -434,16 +432,6 @@ function handleApiRoute(req: IncomingMessage, res: ServerResponse, urlPath: stri
   if (sessionMatch && req.method === 'GET') return serveSessionFile(res, sessionMatch[1], sessionMatch[2]);
 
   json(res, 404, { error: 'Not found' });
-}
-
-function serveQr(res: ServerResponse) {
-  if (!lanUrl) return json(res, 503, { error: 'Server not ready' });
-  Promise.all([QRCode.toDataURL(lanUrl, { width: 256, margin: 2 }), tailscaleUrl ? QRCode.toDataURL(tailscaleUrl, { width: 256, margin: 2 }) : null])
-    .then(([lan, ts]) => {
-      const tsSection = tailscaleUrl && ts ? `<p style="margin-top:24px;color:rgba(255,255,255,0.3);font-size:11px">TAILSCALE</p><img src="${ts}" width="256" height="256" alt="Tailscale QR"><a href="${tailscaleUrl}">${tailscaleUrl}</a>` : '';
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width"><title>Tau — Connect</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#131316;color:#fff;font-family:-apple-system,sans-serif}img{border-radius:12px}a{color:#b87a5c;font-size:18px;margin-top:16px}p{color:rgba(255,255,255,0.5);font-size:13px;margin-top:8px}</style></head><body><p style="color:rgba(255,255,255,0.3);font-size:11px">LAN</p><img src="${lan}" width="256" height="256" alt="QR Code"><a href="${lanUrl}">${lanUrl}</a>${tsSection}<p style="margin-top:16px">Scan to open Tau on your phone</p></body></html>`);
-    }).catch((e) => json(res, 500, { error: errorMessage(e) }));
 }
 
 function liveFilesSet() {
