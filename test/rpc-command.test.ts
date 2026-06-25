@@ -32,8 +32,13 @@ interface RpcTestSession {
   sessionFile: string;
   sessionName: string | null;
   titleSet: boolean;
+  autoCompactionEnabled: boolean;
+  autoRetryEnabled: boolean;
+  steeringMode: string;
+  followUpMode: string;
   entries: Array<Record<string, unknown>>;
   contextUsage: { tokens?: number; usage?: { input_tokens: number; output_tokens: number } } | null;
+  setSessionName: (name: unknown) => boolean;
   metadata: () => Record<string, unknown>;
   snapshot: () => Record<string, unknown>;
   send: (cmd: { id?: string; type?: string; [k: string]: unknown }) =>
@@ -68,12 +73,23 @@ function injectSession(overrides: Partial<RpcTestSession> = {}): RpcTestSession 
     sessionFile: SESSION_FILE,
     sessionName: null,
     titleSet: false,
+    autoCompactionEnabled: true,
+    autoRetryEnabled: true,
+    steeringMode: 'one-at-a-time',
+    followUpMode: 'one-at-a-time',
     entries: [{ type: 'message', message: { role: 'user', content: 'hi' } }],
     contextUsage: null,
+    setSessionName: (name) => {
+      const value = String(name || '').trim();
+      session.sessionName = value || null;
+      return !!value;
+    },
     metadata: () => ({
       id: session.id, cwd: session.cwd, model: session.model, modelSpec: session.modelSpec,
       modelLabel: session.model, thinkingLevel: session.thinkingLevel, isStreaming: session.isStreaming,
       sessionFile: session.sessionFile, sessionName: session.sessionName, contextUsage: session.contextUsage,
+      autoCompactionEnabled: session.autoCompactionEnabled, autoRetryEnabled: session.autoRetryEnabled,
+      steeringMode: session.steeringMode, followUpMode: session.followUpMode,
     }),
     snapshot: () => ({
       session: { id: session.id },
@@ -203,15 +219,13 @@ test('live_session_snapshot_request returns a live_session_snapshot payload', as
   assert.deepEqual(resp.entries, session.entries);
 });
 
-test('set_auto_compaction echoes the enabled flag without persisting state', async () => {
-  // current implementation gates this behind the active-session check
+test('set_auto_compaction is proxied and updates cached state', async () => {
   const session = injectSession();
   const resp = await handleRpcCommand({ type: 'set_auto_compaction', sessionId: session.id, enabled: false });
   assert.equal(resp.success, true);
-  assert.equal(resp.data.enabled, false);
-  // the echo persists nothing: get_state still reports the hardcoded default
+  assert.equal(session.autoCompactionEnabled, false);
   const state = await handleRpcCommand({ type: 'get_state', sessionId: session.id });
-  assert.equal(state.data.autoCompactionEnabled, true);
+  assert.equal(state.data.autoCompactionEnabled, false);
 });
 
 test('native commands require an active live session', async () => {
@@ -234,6 +248,75 @@ test('native commands are proxied to the child and success is preserved', async 
   const resp = await handleRpcCommand({ type: 'prompt', sessionId: session.id, message: 'hi' });
   assert.equal(resp.success, true);
   assert.equal(resp.data.ok, 1);
+});
+
+test('new RPC parity commands are proxied to the child', async () => {
+  const seen: string[] = [];
+  const session = injectSession({
+    send: async (cmd) => {
+      seen.push(cmd.type || '');
+      return { type: 'response', id: cmd.id, success: true, data: { output: 'ok' } };
+    },
+  });
+  for (const type of ['set_auto_retry', 'abort_retry', 'bash', 'abort_bash', 'set_steering_mode', 'set_follow_up_mode']) {
+    const resp = await handleRpcCommand({ type, sessionId: session.id, command: 'echo ok', enabled: false, mode: 'all' });
+    assert.equal(resp.success, true, type);
+  }
+  assert.deepEqual(seen, ['set_auto_retry', 'abort_retry', 'bash', 'abort_bash', 'set_steering_mode', 'set_follow_up_mode']);
+  assert.equal(session.autoRetryEnabled, false);
+  assert.equal(session.steeringMode, 'all');
+  assert.equal(session.followUpMode, 'all');
+});
+
+test('get_commands is proxied to the child for slash command discovery', async () => {
+  let seenType = '';
+  const session = injectSession({
+    send: async (cmd) => {
+      seenType = cmd.type || '';
+      return { type: 'response', id: cmd.id, success: true, data: { commands: [{ name: 'compact' }] } };
+    },
+  });
+  const resp = await handleRpcCommand({ type: 'get_commands', sessionId: session.id });
+  assert.equal(resp.success, true);
+  assert.equal(seenType, 'get_commands');
+  assert.deepEqual(resp.data.commands, [{ name: 'compact' }]);
+});
+
+test('session replacement commands are proxied and refresh cached state', async () => {
+  const nextFile = path.join(PROJ, 'next.jsonl');
+  const seen: string[] = [];
+  const session = injectSession({
+    send: async (cmd) => {
+      seen.push(cmd.type || '');
+      if (cmd.type === 'new_session') return { type: 'response', id: cmd.id, success: true, data: { cancelled: false } };
+      if (cmd.type === 'get_state') {
+        return {
+          type: 'response',
+          id: cmd.id,
+          success: true,
+          data: {
+            sessionFile: nextFile,
+            sessionName: 'Fresh',
+            model: { provider: 'openrouter', id: 'z-ai/glm' },
+            thinkingLevel: 'high',
+            isStreaming: false,
+          },
+        };
+      }
+      if (cmd.type === 'get_messages') {
+        return { type: 'response', id: cmd.id, success: true, data: { messages: [{ role: 'user', content: 'fresh prompt' }] } };
+      }
+      return { type: 'response', id: cmd.id, success: true, data: {} };
+    },
+  });
+  const resp = await handleRpcCommand({ type: 'new_session', sessionId: session.id });
+  assert.equal(resp.success, true);
+  assert.deepEqual(seen, ['new_session', 'get_state', 'get_messages']);
+  assert.equal(session.sessionFile, nextFile);
+  assert.equal(session.sessionName, 'Fresh');
+  assert.deepEqual(session.model, { provider: 'openrouter', id: 'z-ai/glm' });
+  assert.equal(session.thinkingLevel, 'high');
+  assert.deepEqual(session.entries, [{ type: 'message', message: { role: 'user', content: 'fresh prompt' } }]);
 });
 
 test('ack timeouts for prompt/abort/extension_ui_response are converted to success', async () => {
@@ -275,6 +358,50 @@ test('export_html rejects an outputPath outside the session directory before inv
   });
   assert.equal(resp.success, false);
   assert.match(resp.error, /session directory/);
+});
+
+test('export_html supports JSONL copy inside the session directory', async () => {
+  const out = path.join(PROJ, 'copy.jsonl');
+  const resp = await handleRpcCommand({
+    type: 'export_html',
+    filePath: SESSION_FILE,
+    outputPath: out,
+  });
+  assert.equal(resp.success, true);
+  assert.equal(resp.data.path, out);
+  assert.equal(fs.readFileSync(out, 'utf8'), fs.readFileSync(SESSION_FILE, 'utf8'));
+});
+
+test('trust_project writes trust.json for the live session cwd', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-trust-'));
+  const session = injectSession({ cwd });
+  const resp = await handleRpcCommand({ type: 'trust_project', sessionId: session.id, trusted: true });
+  assert.equal(resp.success, true);
+  assert.equal(resp.data.trusted, true);
+  const trustPath = path.join(process.env.PI_CODING_AGENT_DIR, 'trust.json');
+  const trust = JSON.parse(fs.readFileSync(trustPath, 'utf8'));
+  assert.equal(trust[fs.realpathSync(cwd)], true);
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('local_bash runs in the live session cwd without child Pi', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-bash-'));
+  fs.writeFileSync(path.join(cwd, 'marker.txt'), 'ok');
+  const session = injectSession({ cwd });
+  const resp = await handleRpcCommand({ type: 'local_bash', sessionId: session.id, command: process.platform === 'win32' ? 'dir marker.txt' : 'ls marker.txt' });
+  assert.equal(resp.success, true);
+  assert.match(String(resp.data.output), /marker\.txt/);
+  fs.rmSync(cwd, { recursive: true, force: true });
+});
+
+test('import_session can resume an existing session-dir JSONL', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-import-'));
+  const session = injectSession({ cwd, sessionFile: SESSION_FILE });
+  const resp = await handleRpcCommand({ type: 'import_session', sessionId: session.id, filePath: SESSION_FILE });
+  assert.equal(resp.success, true);
+  assert.equal(resp.data.filePath, SESSION_FILE);
+  assert.equal(resp.data.session.id, session.id);
+  fs.rmSync(cwd, { recursive: true, force: true });
 });
 
 test('set_auth persists the enabled flag to settings.json', async () => {

@@ -58,6 +58,10 @@ export class PiRpcSession {
   sessionFile: string | null;
   sessionName: string | null;
   contextUsage: JsonRecord | null;
+  autoCompactionEnabled: boolean;
+  autoRetryEnabled: boolean;
+  steeringMode: string;
+  followUpMode: string;
   pending: Map<string, PendingCommand>;
   stdoutBuffer: string;
   terminating: boolean;
@@ -83,6 +87,10 @@ export class PiRpcSession {
     this.sessionName = opts.sessionName || null;
     if (opts.entries && opts.entries.length) this.entries = opts.entries;
     this.contextUsage = null;
+    this.autoCompactionEnabled = true;
+    this.autoRetryEnabled = true;
+    this.steeringMode = 'one-at-a-time';
+    this.followUpMode = 'one-at-a-time';
     this.pending = new Map();
     this.stdoutBuffer = '';
     this.terminating = false;
@@ -103,6 +111,10 @@ export class PiRpcSession {
       sessionFile: this.sessionFile,
       sessionName: this.sessionName,
       isStreaming: this.isStreaming,
+      autoCompactionEnabled: this.autoCompactionEnabled,
+      autoRetryEnabled: this.autoRetryEnabled,
+      steeringMode: this.steeringMode,
+      followUpMode: this.followUpMode,
       createdAt: this.createdAt,
       lastActiveAt: this.lastActiveAt,
       contextUsage: this.contextUsage,
@@ -130,10 +142,12 @@ export class PiRpcSession {
     if (this.sessionFile) args.push('--session', this.sessionFile);
     if (this.modelSpec) args.push('--model', this.modelSpec);
     const spawnFn: SpawnFn = _spawnPiForTest || spawn;
-    const child = spawnFn('pi', args, {
+    const piCommand = process.env.TAU_PI_COMMAND || 'pi';
+    const child = spawnFn(piCommand, args, {
       cwd: this.cwd,
       env: { ...process.env, TAU_DISABLED: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
+      ...(process.platform === 'win32' ? { shell: true, windowsHide: true } : {}),
     });
     this.child = child;
     this.pid = child.pid || null;
@@ -256,6 +270,14 @@ export class PiRpcSession {
     if (data.thinkingLevel) this.thinkingLevel = data.thinkingLevel;
     if (data.level) this.thinkingLevel = data.level;
     if (data.tokens) this.contextUsage = { ...(this.contextUsage || {}), tokens: data.tokens };
+    if (data.autoCompactionEnabled !== undefined) this.autoCompactionEnabled = !!data.autoCompactionEnabled;
+    if (data.autoRetryEnabled !== undefined) this.autoRetryEnabled = !!data.autoRetryEnabled;
+    if (typeof data.steeringMode === 'string') this.steeringMode = data.steeringMode;
+    if (typeof data.followUpMode === 'string') this.followUpMode = data.followUpMode;
+    if (command === 'set_auto_compaction') this.autoCompactionEnabled = !!data.enabled;
+    if (command === 'set_auto_retry') this.autoRetryEnabled = !!data.enabled;
+    if (command === 'set_steering_mode' && typeof data.mode === 'string') this.steeringMode = data.mode;
+    if (command === 'set_follow_up_mode' && typeof data.mode === 'string') this.followUpMode = data.mode;
     if (command === 'set_model' || command === 'cycle_model') {
       if (data.model) this.model = normalizeModel(data.model);
       else if (data.provider && data.id) this.model = normalizeModel(data);

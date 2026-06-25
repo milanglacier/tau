@@ -387,6 +387,19 @@ test('GET /api/projects lists project directories under the configured projects 
   assert.equal(proj.active, false);
 });
 
+test('GET /api/browse-dirs lists child directories without a live session', async () => {
+  const child = path.join(PROJECTS_DIR, 'browse-child');
+  fs.mkdirSync(child, { recursive: true });
+  fs.writeFileSync(path.join(PROJECTS_DIR, 'not-a-dir.txt'), 'x');
+  const res = await fetch(`${base}/api/browse-dirs?path=${encodeURIComponent(PROJECTS_DIR)}`);
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.equal(body.path, fs.realpathSync(PROJECTS_DIR));
+  assert.ok(body.roots.length >= 1);
+  assert.ok(body.items.some((i: { name: string; path: string }) => i.name === 'browse-child' && i.path === path.join(fs.realpathSync(PROJECTS_DIR), 'browse-child')));
+  assert.ok(!body.items.some((i: { name: string }) => i.name === 'not-a-dir.txt'));
+});
+
 test('GET /api/projects counts sessions for hyphenated project names using header cwd', async () => {
   const projectPath = path.join(PROJECTS_DIR, 'agent-scratch');
   fs.mkdirSync(projectPath, { recursive: true });
@@ -413,6 +426,24 @@ test('GET /api/files lists the directory for a live session', async () => {
   assert.equal(res.status, 200);
   const body = await jsonBody(res);
   assert.ok(body.items.some((i: { name: string }) => i.name === 'a.txt'));
+});
+
+test('POST /api/upload saves arbitrary files inside the live session cwd', async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'tau-upload-'));
+  const s = fakeSession('tau_upload');
+  s.cwd = cwd;
+  liveManager.sessions.set('tau_upload', s);
+  const res = await fetch(`${base}/api/upload?sessionId=tau_upload&name=${encodeURIComponent('notes.txt')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: 'hello upload',
+  });
+  assert.equal(res.status, 200);
+  const body = await jsonBody(res);
+  assert.equal(body.name, 'notes.txt');
+  assert.equal(body.size, 12);
+  assert.equal(body.path, path.join(fs.realpathSync(cwd), '.tau-uploads', 'notes.txt'));
+  assert.equal(fs.readFileSync(body.path, 'utf8'), 'hello upload');
 });
 
 test('GET /api/file/preview streams a previewable image inside the session cwd', async () => {

@@ -269,7 +269,7 @@ function renderModelPickerSuggestions() {
       model.maxOutput ? `out ${model.maxOutput}` : '',
       model.thinking === true ? 'thinking' : '',
       model.images === true ? 'images' : '',
-    ].filter(Boolean).join(' · ');
+    ].filter(Boolean).join(' - ');
     item.innerHTML = `
       <span class="model-item-name">${escapeHtml(model.id || '')}<span class="model-item-provider">${escapeHtml(model.provider || '')}</span></span>
       <span class="model-item-context">${escapeHtml(meta)}</span>
@@ -493,5 +493,5 @@ async function fetchModelInfo() {
     return true;
   }
 
-  return { applyModelSpec, closeIfOpen, fetchModelInfo, setEnabled, setModelState, setThinkingLevel, updateModelDisplay };
+  return { applyModelSpec, closeIfOpen, fetchModelInfo, open: openModelPicker, setEnabled, setModelState, setThinkingLevel, updateModelDisplay };
 }
