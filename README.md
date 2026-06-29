@@ -65,6 +65,64 @@ pi-tau-web-server --host 127.0.0.1 --port 3001 --open
 TAU_PORT=3001 TAU_HOST=0.0.0.0 TAU_PROJECTS_DIR="$HOME/projects" pi-tau-web-server
 ```
 
+## Containers
+
+The container launcher runs one isolated Tau service per instance name. Docker
+and Podman are supported; set `TAU_CONTAINER_RUNTIME` to select one explicitly.
+The image is built automatically on the first run, or it can be built ahead of
+time:
+
+```bash
+container/tau-container build
+```
+
+Start an instance with credentials in the environment:
+
+```bash
+TAU_USER=alice TAU_PASS='choose-a-password' \
+  container/tau-container run personal --port 3001
+```
+
+Missing credentials are prompted for, with the password input hidden. Start
+additional isolated instances by giving each one a different name and host
+port:
+
+```bash
+container/tau-container run work --port 3002
+container/tau-container status
+container/tau-container logs work
+container/tau-container stop work
+```
+
+The current repository is the only project mounted into the container. It is
+available read-write under `/workspace`, and the container runs with the host
+user and group IDs so edits keep their normal ownership.
+
+On an instance's first launch, the launcher copies
+`${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}` into that instance's writable state.
+Symlinks are dereferenced on the host: their contents become ordinary files or
+directories in the copy, so Nix store and other external symlinks are not
+carried into the container. The host `sessions/`, `npm/`, and `git/`
+directories are excluded. Package declarations remain in `settings.json`, so
+Pi installs missing npm/git packages when its first RPC session starts.
+
+The copied configuration is never refreshed automatically. Changes made by Pi
+or Tau therefore survive container recreation and remain isolated from other
+instances. Session files are also stored separately per instance. By default,
+state is kept under:
+
+```text
+${XDG_DATA_HOME:-$HOME/.local/share}/pi-tau-web-server/instances/<instance>/
+```
+
+Override that root with `TAU_CONTAINER_STATE_DIR`.
+
+Ports bind to all host interfaces by default. HTTP Basic Auth does not encrypt
+credentials or traffic, so use a TLS reverse proxy for access from another
+machine. Pass `--bind 127.0.0.1` to restrict an instance to local access.
+Credentials are not written into the copied Pi settings, although the
+container runtime retains environment variables in container metadata.
+
 ## Features
 
 ### Chat
